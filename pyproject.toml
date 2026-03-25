@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rlvf"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "matplotlib",
+    "torch"
+]
+
+[tool.setuptools.packages.find]
+include = ["rlvf*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-mock",
+    "mypy",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests that call external APIs (deselect with -m 'not integration')",
+]
+testpaths = ["tests"]
