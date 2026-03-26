@@ -116,6 +116,10 @@ class HyperNetwork(torch.nn.Module):
         torch.nn.init.constant_(self.head_log_std.weight, 0)
         torch.nn.init.constant_(self.head_log_std.bias, -1.0)
         #######
+
+        # VALUE #######
+        self.value_head = torch.nn.Linear(profile_dim, 1)
+        #######
     
     def forward(self, x):
         batch_size = x.shape[0]
@@ -146,12 +150,18 @@ class HyperNetwork(torch.nn.Module):
 
         return z_mean, z_logstd
     
-    def get_action_and_logprob(self, x):
+    def get_action_and_logprob(self, x, action=None, use_action=False):
         z_mean, z_logstd = self.forward(x)
 
         z_std = z_logstd.exp()
-        dist = Independent(Normal(z_mean, z_std), 1)
-        z = dist.rsample()
+        dist = Independent(Normal(z_mean, z_std), 2)
         
+        if use_action:
+            return dist.log_prob(action), dist.entropy().mean()
+
+        z = dist.rsample()
         log_prob = dist.log_prob(z)
         return z, log_prob, self.A, self.B
+
+    def get_value(self, x):
+        return self.value_head(x)
