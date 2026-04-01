@@ -5,11 +5,11 @@ class PPO:
             self,
             policy,
             num_iter = 10,
-            clip_ratio=0.5,
-            lr=1e-7,
-            vf_coef=0.7,
+            clip_ratio=0.2,
+            lr=1e-2,
+            vf_coef=0.5,
             ent_coef=0.0,
-            target_kl=1.0
+            target_kl=0.01
             ):
         self.num_iterations = num_iter
         self.pol = policy
@@ -18,7 +18,7 @@ class PPO:
         self.vf_coef = vf_coef
         self.ent_coef = ent_coef
         self.target_kl = target_kl
-        self.optimizer = torch.optim.Adam(lr)
+        self.optimizer = torch.optim.Adam(self.pol.parameters(), lr=lr)
 
     def update(self, batch):
         #one episode is simply a triple of (state, action, reward, logprobs)
@@ -63,9 +63,9 @@ class PPO:
 
     def _evaluate(self, states, actions):
         #states.shape = (batch_size, 19), actions.shape = (batch_size, L*T, rank)
-        logprob, mean_entropy = self.pol.get_action_and_logprob(states, actions=actions, use_action=True)
+        logprob, mean_entropy = self.pol.get_action_and_logprob(states, action=actions, use_action=True)
         #logprob shape = (batch_size,), mean_entropy is scalar
-        values = self.pol.get_values(states).squeeze(-1)
+        values = self.pol.get_value(states).squeeze(-1)
 
         return logprob, values, mean_entropy
 
