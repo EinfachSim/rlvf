@@ -34,7 +34,7 @@ TARGET_KL       = 0.01
 PPO_EPOCHS      = 2
 
 # Env
-NUM_WORKERS         = 8
+NUM_WORKERS         = 2
 EPISODES_PER_WORKER = 8   # 8 × 8 = 64 total per batch
 KL_WEIGHT           = 0.1
 
