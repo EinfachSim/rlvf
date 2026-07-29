@@ -1,9 +1,10 @@
+import json
 import ray
 import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import numpy as np
-import json
+from pydantic import BaseModel, Field, conlist
 import outlines
 
 MODEL_PATH  = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/models/Mistral-7B-v0.3"
@@ -45,9 +46,12 @@ SCORING_KEY = {
     "Benevolence-Dependability":    [19, 27, 55],
 }
 
-# ── Raw Regex Pattern ─────────────────────────────────────────────────────────
-# Matches JSON {"answers": [x1, x2, ..., x57]} with integers strictly between 1 and 6
-PVQ_REGEX_PATTERN = r'\{\s*"answers"\s*:\s*\[\s*([1-6]\s*,\s*){56}[1-6]\s*\]\s*\}'
+# ── Pydantic Schema for Structured Output ────────────────────────────────────
+class PVQAnswers(BaseModel):
+    # Enforces a list of exactly 57 integers, each constrained to [1, 6]
+    answers: conlist(int, min_length=57, max_length=57) = Field(
+        ..., description="List of 57 ratings from 1 to 6"
+    )
 
 
 @ray.remote(num_gpus=1, num_cpus=16)
@@ -55,7 +59,6 @@ class EnvWorker:
     def __init__(self):
         self.device = "cuda:0"
 
-        # ── Model ─────────────────────────────────────────────────────────────
         print(f"[EnvWorker] Loading model from {MODEL_PATH}...")
         self.model = AutoModelForCausalLM.from_pretrained(
             MODEL_PATH,
@@ -67,11 +70,9 @@ class EnvWorker:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # ── Outlines 1.x Setup ───────────────────────────────────────────────
         print("[EnvWorker] Initializing Outlines model wrapper...")
         self.outlines_model = outlines.from_transformers(self.model, self.tokenizer)
 
-        # ── Data ──────────────────────────────────────────────────────────────
         print(f"[EnvWorker] Loading base logits from {DATA_PATH}...")
         data = torch.load(DATA_PATH, map_location=self.device)
         self.base_logits  = data["logits"]   # (n_texts, seq_len, vocab_size)
@@ -80,12 +81,8 @@ class EnvWorker:
         with open(QUEST_PATH) as f:
             self.questionnaire_text = f.read()
 
-        # ── Snapshot base weights ─────────────────────────────────────────────
         self._save_base_weights()
-
         print("[EnvWorker] Ready.")
-
-    # ── Weight management ─────────────────────────────────────────────────────
 
     def _save_base_weights(self):
         self._base_weights = {}
@@ -95,21 +92,13 @@ class EnvWorker:
             self._base_weights[f"{layer_idx}_v"] = attn.v_proj.weight.data.clone()
 
     def _apply_lora(self, z, A, B):
-        """
-        z: (num_layers, num_types, rank)
-        A: {"q": (num_layers, rank, d_in), "v": (num_layers, rank, d_in)}
-        B: {"q": (num_layers, d_out, rank), "v": (num_layers, d_out, rank)}
-
-        W_delta[l,t] = B[t][l] @ diag(z[l,t]) @ A[t][l]
-                     = (B[t][l] * z[l,t].unsqueeze(0)) @ A[t][l]
-        """
         for li, layer_idx in enumerate(TARGET_LAYERS):
             attn = self.model.model.layers[layer_idx].self_attn
             for ti, t in enumerate(LAYER_TYPES):
-                z_lt    = z[li, ti].to(torch.float32)          # (rank,)
-                A_lt    = A[t][li].to(self.device)             # (rank, d_in)
-                B_lt    = B[t][li].to(self.device)             # (d_out, rank)
-                W_delta = (B_lt * z_lt.unsqueeze(0)) @ A_lt   # (d_out, d_in)
+                z_lt    = z[li, ti].to(torch.float32)
+                A_lt    = A[t][li].to(self.device)
+                B_lt    = B[t][li].to(self.device)
+                W_delta = (B_lt * z_lt.unsqueeze(0)) @ A_lt
                 if t == "q":
                     attn.q_proj.weight.data += W_delta.to(torch.float16)
                 else:
@@ -121,8 +110,6 @@ class EnvWorker:
             attn.q_proj.weight.data.copy_(self._base_weights[f"{layer_idx}_q"])
             attn.v_proj.weight.data.copy_(self._base_weights[f"{layer_idx}_v"])
 
-    # ── KL divergence ─────────────────────────────────────────────────────────
-
     def _get_adapted_logits(self):
         inputs = self.tokenizer(
             self.domain_texts,
@@ -132,7 +119,7 @@ class EnvWorker:
             max_length=512,
         ).to(self.device)
         with torch.no_grad():
-            return self.model(**inputs).logits  # (n_texts, seq_len, vocab_size)
+            return self.model(**inputs).logits
 
     def _compute_kl(self, adapted_logits):
         seq_len = min(self.base_logits.shape[1], adapted_logits.shape[1])
@@ -142,87 +129,64 @@ class EnvWorker:
         q = F.log_softmax(adapted, dim=-1)
         return F.kl_div(q, p, reduction="batchmean").item()
 
-    # ── Questionnaire ─────────────────────────────────────────────────────────
-
     def _build_prompt(self, profile: list[float]) -> str:
         value_desc = "\n".join(
             f"  {name}: {score:+.2f}"
             for name, score in zip(VALUE_NAMES, profile)
         )
         return (
-            "You are roleplaying as a person."
-            "Answer the PVQ-RR questionnaire below AS this person. "
-            "Reply ONLY with a JSON object with key 'answers' containing 57 integers, "
-            "each an integer from 1 (not like me at all) to 6 (very much like me) corresponding to items 1 to 57 in order. "
-            "No explanation, no preamble, JSON only.\n\n"
-            f"{self.questionnaire_text}\n\nJSON:"
+            "You are roleplaying as a person with the following value profile:\n"
+            f"{value_desc}\n\n"
+            "Answer the PVQ-RR questionnaire below AS this person.\n\n"
+            f"{self.questionnaire_text}\n"
         )
 
     def _answer_questionnaire(self, profile: list[float]) -> dict:
         prompt = self._build_prompt(profile)
         
-        # Outlines 1.x Call: Directly call model passing prompt and regex string
+        # Outlines 1.x Call: Pass Pydantic schema and use `max_tokens`
         json_str = self.outlines_model(
             prompt,
-            output_type=PVQ_REGEX_PATTERN,
-            max_new_tokens=600,
+            output_type=PVQAnswers,
+            max_tokens=600,
         )
         
-        data = json.loads(json_str)
-        answers_list = data["answers"]
+        # Parse JSON and validate against schema
+        res = PVQAnswers.model_validate_json(json_str)
         
-        # Convert the 57-element list back to {"q1": val1, ..., "q57": val57} for _score compatibility
-        return {f"q{i+1}": score for i, score in enumerate(answers_list)}
-
-    # ── Scoring ───────────────────────────────────────────────────────────────
+        # Map back to {"q1": val1, ..., "q57": val57}
+        return {f"q{i+1}": min(max(int(val), 1), 6) for i, val in enumerate(res.answers)}
 
     def _score(self, answers: dict, profile: list[float]) -> float:
-        # 1. Flatten answers to (57,) array
         answered = np.array([answers[f"q{i}"] for i in range(1, 58)], dtype=float)
 
-        # 2. Aggregate to 19 Schwartz dimensions, then ipsatize
         dim_means = np.array([
             answered[np.array(items) - 1].mean()
             for items in SCORING_KEY.values()
         ])
-        answered_profile = dim_means - answered.mean()  # ipsatized (19,)
+        answered_profile = dim_means - answered.mean()
+        gt_profile = np.array(profile)
 
-        # 3. Compare to ground truth profile (already ipsatized)
-        gt_profile = np.array(profile)                  # (19,)
-
-        # Negative MSE — zero is perfect, more negative is worse
         return -float(np.mean((answered_profile - gt_profile) ** 2))
-
-    # ── Main episode ──────────────────────────────────────────────────────────
 
     def run_episode(
         self,
         adapter_id: int,
-        profile: list[float],   # ground truth Schwartz profile for this env
-        z_np,                   # numpy (num_layers, num_types, rank)
-        A_np: dict,             # {"q": numpy array, "v": numpy array}
-        B_np: dict,             # {"q": numpy array, "v": numpy array}
+        profile: list[float],
+        z_np,
+        A_np: dict,
+        B_np: dict,
         kl_weight: float = 0.1,
     ) -> dict:
-        """Single-step episode. Returns reward and diagnostics."""
-
-        # Ray serialises torch tensors as numpy — convert back
         z = torch.tensor(z_np, device=self.device, dtype=torch.float32)
         A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
         B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
 
         try:
-            # 1. Modify model weights with this adapter
             self._apply_lora(z, A, B)
-
-            # 2. KL divergence on AITA posts vs base model
             adapted_logits = self._get_adapted_logits()
             kl = self._compute_kl(adapted_logits)
-
-            # 3. Answer PVQ-RR as the profiled person
             answers = self._answer_questionnaire(profile)
-
-            # 4. Score against ground truth
             score = self._score(answers, profile)
 
             return {
@@ -233,7 +197,6 @@ class EnvWorker:
             }
 
         except Exception as e:
-            # Return a zero reward on failure rather than crashing the pool
             print(f"[EnvWorker] Episode {adapter_id} failed: {e}")
             return {
                 "adapter_id": adapter_id,
@@ -244,9 +207,7 @@ class EnvWorker:
             }
 
         finally:
-            # Always restore base weights — even on exception
             self._restore_base_weights()
 
     def run_episodes_serial(self, episodes: list[dict]) -> list[dict]:
-        """Run a list of episodes sequentially on this worker."""
         return [self.run_episode(**ep) for ep in episodes]
