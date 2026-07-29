@@ -1,170 +1,139 @@
-"""
-train.py
-
-Main training loop. Runs on the SLURM head node (has GPU for HyperNetwork).
-Ray workers on the other node handle environment computation.
-"""
-
+import os
+import sys
 import ray
 import torch
-from pathlib import Path
+import numpy as np
+import wandb
 
-from rlvf.model import HyperNetwork
+# Local imports from your project
+from rlvf.workers import EnvWorker
 from rlvf.ppo import PPO
-from rlvf.env import RLVFEnv
+from rlvf.model import PolicyValueNetwork  # Adjust if your import path differs
 
-# ── Config ────────────────────────────────────────────────────────────────────
-DEVICE          = "cuda:0"
-LUSTRE          = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf"
-CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints"
+# Configuration parameters
+NUM_STEPS = 100
+EPISODES_PER_STEP = 16
+NUM_WORKERS = 2  # Matches available GPU resources (1 worker per GPU)
+KL_WEIGHT = 0.1
+LEARNING_RATE = 1e-4
 
-# HyperNetwork
-NUM_LAYERS      = 5
-LAYER_TYPES     = ["q", "v"]
-DIMS            = {"q": [4096, 4096], "v": [1024, 4096]}
-PROFILE_DIM     = 19
-RANK            = 8
+def main():
+    # 1. Initialize Ray cluster connection
+    if not ray.is_initialized():
+        ray.init(ignore_reinit_error=True)
 
-# PPO
-LR              = 1e-3
-CLIP_RATIO      = 0.2
-VF_COEF         = 0.5
-ENT_COEF        = 0.01
-TARGET_KL       = 0.01
-PPO_EPOCHS      = 2
-
-# Env
-NUM_WORKERS         = 2
-EPISODES_PER_WORKER = 8   # 8 × 8 = 64 total per batch
-KL_WEIGHT           = 0.1
-
-# Training
-TOTAL_STEPS     = 1000
-EVAL_EVERY      = 10
-SAVE_EVERY      = 50
-LOG_EVERY       = 1
-
-# ── Init Ray ──────────────────────────────────────────────────────────────────
-ray.init(address="auto")
-print(f"Ray cluster resources: {ray.cluster_resources()}")
-
-# ── Init HyperNetwork on GPU ──────────────────────────────────────────────────
-print("Initialising HyperNetwork...")
-policy = HyperNetwork(
-    num_layers  = NUM_LAYERS,
-    layer_types = LAYER_TYPES,
-    dims        = DIMS,
-    profile_dim = PROFILE_DIM,
-    rank        = RANK,
-).to(DEVICE)
-
-# ── Init PPO ──────────────────────────────────────────────────────────────────
-ppo = PPO(
-    policy      = policy,
-    num_iter    = PPO_EPOCHS,
-    clip_ratio  = CLIP_RATIO,
-    lr          = LR,
-    vf_coef     = VF_COEF,
-    ent_coef    = ENT_COEF,
-    target_kl   = TARGET_KL,
-)
-
-# ── Init Env ──────────────────────────────────────────────────────────────────
-print("Spawning environment workers...")
-env = RLVFEnv(
-    num_workers         = NUM_WORKERS,
-    episodes_per_worker = EPISODES_PER_WORKER,
-    kl_weight           = KL_WEIGHT,
-)
-print(f"Batch size: {env.batch_size}")
-
-# ── Checkpoint helpers ────────────────────────────────────────────────────────
-Path(CHECKPOINT_DIR).mkdir(parents=True, exist_ok=True)
-
-def save_checkpoint(step: int):
-    path = f"{CHECKPOINT_DIR}/hn_step_{step:05d}.pt"
-    torch.save({
-        "step":       step,
-        "model":      policy.state_dict(),
-        "optimizer":  ppo.optimizer.state_dict(),
-    }, path)
-    print(f"[train] Checkpoint saved to {path}")
-
-def load_checkpoint(path: str) -> int:
-    ckpt = torch.load(path, map_location=DEVICE)
-    policy.load_state_dict(ckpt["model"])
-    ppo.optimizer.load_state_dict(ckpt["optimizer"])
-    print(f"[train] Resumed from {path} (step {ckpt['step']})")
-    return ckpt["step"]
-
-# ── Resume from latest checkpoint if exists ───────────────────────────────────
-start_step = 0
-ckpts = sorted(Path(CHECKPOINT_DIR).glob("hn_step_*.pt"))
-if ckpts:
-    start_step = load_checkpoint(str(ckpts[-1]))
-
-# ── Training loop ─────────────────────────────────────────────────────────────
-print(f"\nStarting training from step {start_step}...")
-
-for step in range(start_step, TOTAL_STEPS):
-
-    # 1. Sample fresh profiles for this batch
-    states = env.get_observation_batch(env.batch_size).to(DEVICE)  # (B, 19)
-
-    # 2. Sample actions from policy — detach everything before handing to PPO
-    #    PPO recomputes log_probs internally via _evaluate for the gradient flow
-    with torch.no_grad():
-        actions, log_probs, A, B = policy.get_action_and_logprob(states)
-        actions   = actions.detach()
-        log_probs = log_probs.detach()
-
-    # 3. Fan out to environment workers — collect rewards
-    rewards = env.step_batch(
-        action_batch = actions.cpu(),
-        states       = states.cpu(),
-        A            = A,
-        B            = B,
-    ).to(DEVICE)  # (B,)
-
-    # 4. PPO update — pass fully detached batch
-    batch = (
-        states.detach(),
-        actions.detach(),
-        rewards.detach(),
-        log_probs.detach(),
+    print("Initializing Weights & Biases...")
+    # 2. Initialize WandB logging
+    wandb.init(
+        project="rlvf-pvq-alignment",
+        name="mistral-7b-lora-ppo",
+        config={
+            "model": "Mistral-7B-v0.3",
+            "kl_weight": KL_WEIGHT,
+            "learning_rate": LEARNING_RATE,
+            "num_steps": NUM_STEPS,
+            "episodes_per_step": EPISODES_PER_STEP,
+            "num_workers": NUM_WORKERS,
+        }
     )
-    ppo.update(batch)
 
-    # 5. Logging
-    if step % LOG_EVERY == 0:
-        print(
-            f"[train] step {step:04d} | "
-            f"reward: {rewards.mean().item():+.4f} | "
-            f"reward_std: {rewards.std().item():.4f}"
-        )
+    print(f"Instantiating {NUM_WORKERS} Ray EnvWorkers...")
+    # 3. Create worker actors (1 GPU per worker)
+    workers = [EnvWorker.remote() for _ in range(NUM_WORKERS)]
 
-    # 6. Eval
-    if step % EVAL_EVERY == 0:
-        eval_states = env.eval_profiles.to(DEVICE)  # fixed (32, 19)
+    print("Initializing PPO Controller...")
+    # 4. Initialize PPO Policy & Value Network and Optimizer
+    # Adjust state/action space dimensions according to your model spec
+    policy_net = PolicyValueNetwork()  
+    ppo = PPO(policy_net, lr=LEARNING_RATE)
+
+    print("Starting training loop...")
+
+    for step in range(NUM_STEPS):
+        # Sample or generate random target profiles for this batch (e.g., 16 profiles)
+        profiles = np.random.uniform(-1.0, 1.0, size=(EPISODES_PER_STEP, 10)).astype(np.float32)
+
+        # 5. Evaluate PPO policy on profiles to get actions (z, A, B)
         with torch.no_grad():
-            eval_actions, _, eval_A, eval_B = policy.get_action_and_logprob(eval_states)
-            eval_actions = eval_actions.detach()
-        eval_metrics = env.eval_batch(
-            action_batch = eval_actions.cpu(),
-            A            = eval_A,
-            B            = eval_B,
-        )
+            states = torch.tensor(profiles, dtype=torch.float32)
+            # Sample actions and values from current policy
+            actions, logp, values = ppo.pol.get_action_and_value(states)
+
+        # Convert actions for Ray worker execution
+        actions_np = actions.cpu().numpy()
+
+        # Split batch evenly across workers
+        profiles_split = np.array_split(profiles, NUM_WORKERS)
+        actions_split = np.array_split(actions_np, NUM_WORKERS)
+
+        # 6. Dispatch episodes across active workers
+        futures = []
+        for i, worker in enumerate(workers):
+            f = worker.run_episodes_serial.remote(
+                profiles=profiles_split[i].tolist(),
+                actions=actions_split[i],
+                kl_weight=KL_WEIGHT,
+            )
+            futures.append(f)
+
+        # Gather worker results
+        worker_results = ray.get(futures)
+        episodes = [ep for sublist in worker_results for ep in sublist]
+
+        # Extract environment metrics
+        rewards = [ep["reward"] for ep in episodes]
+        scores = [ep["score"] for ep in episodes]
+        kls = [ep["kl"] for ep in episodes]
+
+        # 7. Construct batch for PPO update
+        batch = {
+            "states": states,
+            "actions": actions,
+            "logp_old": logp,
+            "values_old": values,
+            "rewards": torch.tensor(rewards, dtype=torch.float32),
+            "episodes": episodes,
+        }
+
+        # 8. Perform PPO update
+        ppo_info = ppo.update(batch)
+
+        # Compute summary metrics
+        mean_reward = float(np.mean(rewards))
+        mean_score = float(np.mean(scores))
+        mean_kl = float(np.mean(kls))
+
+        # 9. Log step metrics to WandB
+        metrics = {
+            "train/reward_mean": mean_reward,
+            "train/reward_min": float(np.min(rewards)),
+            "train/reward_max": float(np.max(rewards)),
+            "train/score_mean": mean_score,
+            "train/kl_mean": mean_kl,
+            "step": step,
+        }
+
+        # Add PPO loss metrics if returned by ppo.update()
+        if isinstance(ppo_info, dict):
+            for k, v in ppo_info.items():
+                if isinstance(v, torch.Tensor):
+                    v = v.item()
+                metrics[f"ppo/{k}"] = v
+
+        wandb.log(metrics, step=step)
+
+        # Console logging
         print(
-            f"[eval]  step {step:04d} | "
-            f"reward: {eval_metrics['eval_reward_mean']:+.4f} ± "
-            f"{eval_metrics['eval_reward_std']:.4f}"
+            f"Step {step:03d}/{NUM_STEPS:03d} | "
+            f"Reward: {mean_reward:8.4f} | "
+            f"Score: {mean_score:8.4f} | "
+            f"KL: {mean_kl:8.4f}"
         )
 
-    # 7. Checkpoint
-    if step % SAVE_EVERY == 0 and step > 0:
-        save_checkpoint(step)
+    # Clean close
+    print("Training complete. Closing WandB run...")
+    wandb.finish()
 
-# Final checkpoint
-save_checkpoint(TOTAL_STEPS)
-print("Training complete.")
-ray.shutdown()
+
+if __name__ == "__main__":
+    main()
