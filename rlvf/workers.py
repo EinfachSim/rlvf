@@ -131,7 +131,13 @@ class EnvWorker:
         raw_kl = F.kl_div(q, p, reduction="none")
         print(f"[Diag KL] Any NaNs in elementwise KL? {torch.isnan(raw_kl).any().item()}")
         print(f"[Diag KL] Max elementwise KL: {raw_kl.max().item()}")
-        return F.kl_div(q, p, reduction="batchmean").item()
+
+        kl_tensor = F.kl_div(q, p, reduction="batchmean")
+
+        kl_scalar = kl_tensor.item()
+        print(f"[Diag KL Scalar] Type: {type(kl_scalar)}, Value: {kl_scalar}")
+
+        return kl_scalar
 
     def _build_prompt(self, profile: list[float]) -> str:
         value_desc = "\n".join(
@@ -213,11 +219,15 @@ class EnvWorker:
             answers = self._answer_questionnaire(profile)
             score = self._score(answers, profile)
 
+            reward = score - kl_weight * kl
+
+            print(f"[Diag Episode End] score={score}, kl={kl}, reward={reward}")
+
             return {
                 "adapter_id": adapter_id,
                 "kl":         kl,
                 "score":      score,
-                "reward":     score - kl_weight * kl,
+                "reward":     reward,
             }
 
         except Exception as e:
