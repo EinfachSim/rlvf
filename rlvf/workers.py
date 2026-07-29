@@ -136,7 +136,7 @@ class EnvWorker:
         kl_tensor = F.kl_div(q, p, reduction="batchmean")
         kl_per_token = kl_tensor / seq_len
         
-        return float(kl_tensor.item())
+        return float(kl_per_token.item())
 
     def _build_prompt(self, profile: list[float]) -> str:
         value_desc = "\n".join(
