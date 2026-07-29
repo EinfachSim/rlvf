@@ -45,11 +45,25 @@ SCORING_KEY = {
     "Benevolence-Dependability":    [19, 27, 55],
 }
 
+# ── Outlines Array Schema ───────────────────────────────────────────────────
+# Instead of 57 individual properties (which causes FSM state-space explosion),
+# we define an object with an array 'answers' of exactly 57 constrained integers.
 QUESTIONNAIRE_SCHEMA = {
     "type": "object",
-    "properties": {f"q{i}": {"type": "integer", "minimum": 1, "maximum": 6} for i in range(1, 58)},
-    "required": [f"q{i}" for i in range(1, 58)],
-    "additionalProperties": False,
+    "properties": {
+        "answers": {
+            "type": "array",
+            "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 6
+            },
+            "minItems": 57,
+            "maxItems": 57
+        }
+    },
+    "required": ["answers"],
+    "additionalProperties": False
 }
 
 
@@ -153,28 +167,29 @@ class EnvWorker:
             for name, score in zip(VALUE_NAMES, profile)
         )
         return (
-            "You are roleplaying as a person with the following Schwartz value profile "
-            "(ipsatized scores — positive means stronger relative priority, "
-            "negative means weaker):\n"
-            f"{value_desc}\n\n"
+            "You are roleplaying as a person."
             "Answer the PVQ-RR questionnaire below AS this person. "
-            "Reply ONLY with a JSON object with keys q1 through q57, "
-            "each an integer from 1 (not like me at all) to 6 (very much like me). "
-            "No explanation, no preamble — JSON only.\n\n"
+            "Reply ONLY with a JSON object with a single key 'answers' containing a JSON array of 57 integers, "
+            "each an integer from 1 (not like me at all) to 6 (very much like me) corresponding to items 1 through 57 in order. "
+            "No explanation, no preamble, JSON only.\n\n"
             f"{self.questionnaire_text}\n\nJSON:"
         )
 
     def _answer_questionnaire(self, profile: list[float]) -> dict:
         prompt = self._build_prompt(profile)
         
-        # Outlines 1.x+: Call the wrapped model directly passing prompt and schema
+        # Outlines generation call using the array schema
         json_str = self.outlines_model(
             prompt,
             output_type=QUESTIONNAIRE_SCHEMA,
             max_new_tokens=600,
         )
         
-        return json.loads(json_str)
+        data = json.loads(json_str)
+        answers_list = data["answers"]
+        
+        # Map the list array back to {"q1": val1, ..., "q57": val57} for _score
+        return {f"q{i+1}": score for i, score in enumerate(answers_list)}
 
     # ── Scoring ───────────────────────────────────────────────────────────────
 
