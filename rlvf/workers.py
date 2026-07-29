@@ -134,6 +134,7 @@ class EnvWorker:
         
         # 3. Compute KL divergence in float32 space
         kl_tensor = F.kl_div(q, p, reduction="batchmean")
+        kl_per_token = kl_tensor / seq_len
         
         return float(kl_tensor.item())
 
