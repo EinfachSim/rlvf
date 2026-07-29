@@ -5,7 +5,6 @@ Main training loop. Runs on the SLURM head node (has GPU for HyperNetwork).
 Ray workers on the other node handle environment computation.
 """
 
-import os
 import ray
 import torch
 from pathlib import Path
@@ -22,7 +21,7 @@ CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints"
 # HyperNetwork
 NUM_LAYERS      = 5
 LAYER_TYPES     = ["q", "v"]
-DIMS            = {"q": [4096, 4096], "v": [1024, 4096]}  # [d_out, d_in]
+DIMS            = {"q": [4096, 4096], "v": [1024, 4096]}
 PROFILE_DIM     = 19
 RANK            = 8
 
@@ -35,14 +34,14 @@ TARGET_KL       = 0.01
 PPO_EPOCHS      = 2
 
 # Env
-NUM_WORKERS         = 8   # 8 GPUs on worker node
+NUM_WORKERS         = 8
 EPISODES_PER_WORKER = 8   # 8 × 8 = 64 total per batch
 KL_WEIGHT           = 0.1
 
 # Training
 TOTAL_STEPS     = 1000
-EVAL_EVERY      = 10     # run eval batch every N steps
-SAVE_EVERY      = 50     # save checkpoint every N steps
+EVAL_EVERY      = 10
+SAVE_EVERY      = 50
 LOG_EVERY       = 1
 
 # ── Init Ray ──────────────────────────────────────────────────────────────────
@@ -70,7 +69,7 @@ ppo = PPO(
     target_kl   = TARGET_KL,
 )
 
-# ── Init Env (spawns Ray workers) ─────────────────────────────────────────────
+# ── Init Env ──────────────────────────────────────────────────────────────────
 print("Spawning environment workers...")
 env = RLVFEnv(
     num_workers         = NUM_WORKERS,
@@ -85,13 +84,13 @@ Path(CHECKPOINT_DIR).mkdir(parents=True, exist_ok=True)
 def save_checkpoint(step: int):
     path = f"{CHECKPOINT_DIR}/hn_step_{step:05d}.pt"
     torch.save({
-        "step":         step,
-        "model":        policy.state_dict(),
-        "optimizer":    ppo.optimizer.state_dict(),
+        "step":       step,
+        "model":      policy.state_dict(),
+        "optimizer":  ppo.optimizer.state_dict(),
     }, path)
     print(f"[train] Checkpoint saved to {path}")
 
-def load_checkpoint(path: str):
+def load_checkpoint(path: str) -> int:
     ckpt = torch.load(path, map_location=DEVICE)
     policy.load_state_dict(ckpt["model"])
     ppo.optimizer.load_state_dict(ckpt["optimizer"])
@@ -112,13 +111,12 @@ for step in range(start_step, TOTAL_STEPS):
     # 1. Sample fresh profiles for this batch
     states = env.get_observation_batch(env.batch_size).to(DEVICE)  # (B, 19)
 
-    # 2. Sample actions from policy
+    # 2. Sample actions from policy — detach everything before handing to PPO
+    #    PPO recomputes log_probs internally via _evaluate for the gradient flow
     with torch.no_grad():
         actions, log_probs, A, B = policy.get_action_and_logprob(states)
-        # actions:   (B, L*T, rank)
-        # log_probs: (B,)
-        # A: {"q": (L, rank, d_in), "v": ...}
-        # B: {"q": (L, d_out, rank), "v": ...}
+        actions   = actions.detach()
+        log_probs = log_probs.detach()
 
     # 3. Fan out to environment workers — collect rewards
     rewards = env.step_batch(
@@ -128,8 +126,13 @@ for step in range(start_step, TOTAL_STEPS):
         B            = B,
     ).to(DEVICE)  # (B,)
 
-    # 4. PPO update
-    batch = (states, actions, rewards, log_probs)
+    # 4. PPO update — pass fully detached batch
+    batch = (
+        states.detach(),
+        actions.detach(),
+        rewards.detach(),
+        log_probs.detach(),
+    )
     ppo.update(batch)
 
     # 5. Logging
@@ -145,6 +148,7 @@ for step in range(start_step, TOTAL_STEPS):
         eval_states = env.eval_profiles.to(DEVICE)  # fixed (32, 19)
         with torch.no_grad():
             eval_actions, _, eval_A, eval_B = policy.get_action_and_logprob(eval_states)
+            eval_actions = eval_actions.detach()
         eval_metrics = env.eval_batch(
             action_batch = eval_actions.cpu(),
             A            = eval_A,
