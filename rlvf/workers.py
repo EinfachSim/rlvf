@@ -123,21 +123,19 @@ class EnvWorker:
 
     def _compute_kl(self, adapted_logits):
         seq_len = min(self.base_logits.shape[1], adapted_logits.shape[1])
-        base    = self.base_logits[:, :seq_len, :]
+        
+        # 1. Slice to matching length
+        base = self.base_logits[:, :seq_len, :]
         adapted = adapted_logits[:, :seq_len, :]
-        p = F.softmax(base, dim=-1)
-        q = F.log_softmax(adapted, dim=-1)
-
-        raw_kl = F.kl_div(q, p, reduction="none")
-        print(f"[Diag KL] Any NaNs in elementwise KL? {torch.isnan(raw_kl).any().item()}")
-        print(f"[Diag KL] Max elementwise KL: {raw_kl.max().item()}")
-
+        
+        # 2. Convert to float32 BEFORE softmax/kl to prevent FP16 accumulator overflow
+        p = F.softmax(base.to(torch.float32), dim=-1)        # Target (probabilities)
+        q = F.log_softmax(adapted.to(torch.float32), dim=-1)  # Input (log-probabilities)
+        
+        # 3. Compute KL divergence in float32 space
         kl_tensor = F.kl_div(q, p, reduction="batchmean")
-
-        kl_scalar = kl_tensor.item()
-        print(f"[Diag KL Scalar] Type: {type(kl_scalar)}, Value: {kl_scalar}")
-
-        return kl_scalar
+        
+        return float(kl_tensor.item())
 
     def _build_prompt(self, profile: list[float]) -> str:
         value_desc = "\n".join(
