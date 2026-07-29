@@ -127,6 +127,10 @@ class EnvWorker:
         adapted = adapted_logits[:, :seq_len, :]
         p = F.softmax(base, dim=-1)
         q = F.log_softmax(adapted, dim=-1)
+
+        raw_kl = F.kl_div(q, p, reduction="none")
+        print(f"[Diag KL] Any NaNs in elementwise KL? {torch.isnan(raw_kl).any().item()}")
+        print(f"[Diag KL] Max elementwise KL: {raw_kl.max().item()}")
         return F.kl_div(q, p, reduction="batchmean").item()
 
     def _build_prompt(self, profile: list[float]) -> str:
@@ -204,7 +208,7 @@ class EnvWorker:
             has_nan_base = torch.isnan(self.base_logits).any().item()
             print(f"[Diag] Base Logits -> NaN: {has_nan_base}")
 
-            
+
             kl = self._compute_kl(adapted_logits)
             answers = self._answer_questionnaire(profile)
             score = self._score(answers, profile)
