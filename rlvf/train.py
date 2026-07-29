@@ -209,7 +209,6 @@ for step in range(start_step, TOTAL_STEPS):
         eval_log_dict = {
             "eval/reward_mean": eval_metrics.get("eval_reward_mean", 0.0),
             "eval/reward_std":  eval_metrics.get("eval_reward_std", 0.0),
-            "step": step,
         }
         
         # Include optional score and KL breakdown if available in eval_metrics
