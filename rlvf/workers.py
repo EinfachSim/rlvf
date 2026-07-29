@@ -45,26 +45,8 @@ SCORING_KEY = {
     "Benevolence-Dependability":    [19, 27, 55],
 }
 
-# ── Outlines Array Schema ───────────────────────────────────────────────────
-# Instead of 57 individual properties (which causes FSM state-space explosion),
-# we define an object with an array 'answers' of exactly 57 constrained integers.
-QUESTIONNAIRE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "answers": {
-            "type": "array",
-            "items": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 6
-            },
-            "minItems": 57,
-            "maxItems": 57
-        }
-    },
-    "required": ["answers"],
-    "additionalProperties": False
-}
+# Raw Regex pattern matching exact JSON: {"answers": [x1, x2, ..., x57]} with integers 1 to 6
+PVQ_REGEX_PATTERN = r'\{\s*"answers"\s*:\s*\[\s*([1-6]\s*,\s*){56}[1-6]\s*\]\s*\}'
 
 
 @ray.remote(num_gpus=1, num_cpus=16)
@@ -84,9 +66,15 @@ class EnvWorker:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # ── Outlines 1.x Setup ───────────────────────────────────────────────
-        print("[EnvWorker] Initializing Outlines model wrapper...")
+        # ── Outlines Regex Setup ──────────────────────────────────────────────
+        print("[EnvWorker] Initializing Outlines model and regex generator...")
         self.outlines_model = outlines.from_transformers(self.model, self.tokenizer)
+        
+        # Pre-compile the raw regex generator once on init (fastest execution path)
+        self.questionnaire_generator = outlines.generate.regex(
+            self.outlines_model, 
+            PVQ_REGEX_PATTERN
+        )
 
         # ── Data ──────────────────────────────────────────────────────────────
         print(f"[EnvWorker] Loading base logits from {DATA_PATH}...")
@@ -169,8 +157,8 @@ class EnvWorker:
         return (
             "You are roleplaying as a person."
             "Answer the PVQ-RR questionnaire below AS this person. "
-            "Reply ONLY with a JSON object with a single key 'answers' containing a JSON array of 57 integers, "
-            "each an integer from 1 (not like me at all) to 6 (very much like me) corresponding to items 1 through 57 in order. "
+            "Reply ONLY with a JSON object with key 'answers' containing 57 integers, "
+            "each from 1 (not like me at all) to 6 (very much like me) corresponding to items 1 to 57 in order. "
             "No explanation, no preamble, JSON only.\n\n"
             f"{self.questionnaire_text}\n\nJSON:"
         )
@@ -178,17 +166,13 @@ class EnvWorker:
     def _answer_questionnaire(self, profile: list[float]) -> dict:
         prompt = self._build_prompt(profile)
         
-        # Outlines generation call using the array schema
-        json_str = self.outlines_model(
-            prompt,
-            output_type=QUESTIONNAIRE_SCHEMA,
-            max_new_tokens=600,
-        )
+        # Execute pre-compiled raw regex FSM generator
+        json_str = self.questionnaire_generator(prompt, max_tokens=600)
         
         data = json.loads(json_str)
         answers_list = data["answers"]
         
-        # Map the list array back to {"q1": val1, ..., "q57": val57} for _score
+        # Convert 57-element array to {"q1": val1, ..., "q57": val57} for _score compatibility
         return {f"q{i+1}": score for i, score in enumerate(answers_list)}
 
     # ── Scoring ───────────────────────────────────────────────────────────────
