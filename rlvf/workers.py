@@ -3,6 +3,8 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import numpy as np
+import json
+import outlines
 
 MODEL_PATH  = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/models/Mistral-7B-v0.3"
 DATA_PATH   = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/data/base_logits.pt"
@@ -67,6 +69,10 @@ class EnvWorker:
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # ── Outlines 1.x Setup ───────────────────────────────────────────────
+        print("[EnvWorker] Initializing Outlines model wrapper...")
+        self.outlines_model = outlines.from_transformers(self.model, self.tokenizer)
 
         # ── Data ──────────────────────────────────────────────────────────────
         print(f"[EnvWorker] Loading base logits from {DATA_PATH}...")
@@ -159,14 +165,16 @@ class EnvWorker:
         )
 
     def _answer_questionnaire(self, profile: list[float]) -> dict:
-        import outlines.models as om
-        import outlines.generate as og
-
-        # Wrap the (already weight-modified) model for outlines
-        wrapped   = om.Transformers(self.model, self.tokenizer)
-        generator = og.json(wrapped, QUESTIONNAIRE_SCHEMA)
-        prompt    = self._build_prompt(profile)
-        return generator(prompt, max_tokens=600)
+        prompt = self._build_prompt(profile)
+        
+        # Outlines 1.x+: Call the wrapped model directly passing prompt and schema
+        json_str = self.outlines_model(
+            prompt,
+            output_type=QUESTIONNAIRE_SCHEMA,
+            max_new_tokens=600,
+        )
+        
+        return json.loads(json_str)
 
     # ── Scoring ───────────────────────────────────────────────────────────────
 
@@ -240,6 +248,7 @@ class EnvWorker:
         finally:
             # Always restore base weights — even on exception
             self._restore_base_weights()
+
     def run_episodes_serial(self, episodes: list[dict]) -> list[dict]:
         """Run a list of episodes sequentially on this worker."""
         return [self.run_episode(**ep) for ep in episodes]
