@@ -189,9 +189,7 @@ class EnvWorker:
     ) -> dict:
 
         
-            # DIAGNOSTIC 1: Check inputs coming from PPO policy
-        print(f"[Diag] z stats: min={z_np.min():.3f}, max={z_np.max():.3f}, has_nan={np.isnan(z_np).any()}")
-        
+                
         z = torch.tensor(z_np, device=self.device, dtype=torch.float32)
         A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
         B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
@@ -203,16 +201,6 @@ class EnvWorker:
         try:
             self._apply_lora(z, A, B)
             adapted_logits = self._get_adapted_logits()
-
-            # DIAGNOSTIC 2: Check raw logits from model forward pass
-            has_nan_logits = torch.isnan(adapted_logits).any().item()
-            has_inf_logits = torch.isinf(adapted_logits).any().item()
-            print(f"[Diag] Adapted Logits -> NaN: {has_nan_logits}, Inf: {has_inf_logits}, min: {adapted_logits.min().item():.2f}, max: {adapted_logits.max().item():.2f}")
-            
-            # DIAGNOSTIC 3: Check base logits stored on disk
-            has_nan_base = torch.isnan(self.base_logits).any().item()
-            print(f"[Diag] Base Logits -> NaN: {has_nan_base}")
-
 
             kl = self._compute_kl(adapted_logits)
             answers = self._answer_questionnaire(profile)
