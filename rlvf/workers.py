@@ -148,7 +148,7 @@ class EnvWorker:
         json_str = self.outlines_model(
             prompt,
             output_type=PVQAnswers,
-            max_tokens=600,
+            max_new_tokens=600,
         )
         
         # Parse JSON and validate against schema
