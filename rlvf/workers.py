@@ -119,24 +119,26 @@ class EnvWorker:
             max_length=512,
         ).to(self.device)
         with torch.no_grad():
-            return self.model(**inputs).logits
+            logits = self.model(**inputs).logits
+        return logits, inputs["attention_mask"]
 
-    def _compute_kl(self, adapted_logits):
+    def _compute_kl(self, adapted_logits, attention_mask):
         seq_len = min(self.base_logits.shape[1], adapted_logits.shape[1])
-        
-        # 1. Slice to matching length
+        mask = attention_mask[:, :seq_len].bool()  # (batch, seq)
+
         base = self.base_logits[:, :seq_len, :]
         adapted = adapted_logits[:, :seq_len, :]
-        
-        # 2. Convert to float32 BEFORE softmax/kl to prevent FP16 accumulator overflow
-        p = F.softmax(base.to(torch.float32), dim=-1)        # Target (probabilities)
-        q = F.log_softmax(adapted.to(torch.float32), dim=-1)  # Input (log-probabilities)
-        
-        # 3. Compute KL divergence in float32 space
-        kl_tensor = F.kl_div(q, p, reduction="batchmean")
-        kl_per_token = kl_tensor / seq_len
-        
-        return float(kl_per_token.item())
+
+        p = F.softmax(base.float(), dim=-1)
+        log_q = F.log_softmax(adapted.float(), dim=-1)
+
+        # Per-token KL: (batch, seq, vocab) -> (batch, seq)
+        kl_per_token = F.kl_div(log_q, p, reduction="none").sum(dim=-1)
+
+        # Mask and mean over non-padding tokens only
+        masked_kl = kl_per_token * mask.float()
+        kl = masked_kl.sum() / mask.float().sum()
+        return float(kl.item())
 
     def _build_prompt(self, profile: list[float]) -> str:
         value_desc = "\n".join(
@@ -144,8 +146,7 @@ class EnvWorker:
             for name, score in zip(VALUE_NAMES, profile)
         )
         return (
-            "You are roleplaying as a person with the following value profile:\n"
-            f"{value_desc}\n\n"
+            "You are roleplaying as a person \n"
             "Answer the PVQ-RR questionnaire below AS this person.\n\n"
             f"{self.questionnaire_text}\n"
         )
@@ -194,15 +195,11 @@ class EnvWorker:
         A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
         B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
 
-        z = torch.tensor(z_np, device=self.device, dtype=torch.float32)
-        A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
-        B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
-
         try:
             self._apply_lora(z, A, B)
-            adapted_logits = self._get_adapted_logits()
+            adapted_logits, attention_mask = self._get_adapted_logits()
 
-            kl = self._compute_kl(adapted_logits)
+            kl = self._compute_kl(adapted_logits, attention_mask)
             answers = self._answer_questionnaire(profile)
             score = self._score(answers, profile)
 

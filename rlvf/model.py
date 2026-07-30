@@ -118,7 +118,13 @@ class HyperNetwork(torch.nn.Module):
         #######
 
         # VALUE #######
-        self.value_head = torch.nn.Linear(profile_dim, 1)
+        self.value_head = torch.nn.Sequential(
+            torch.nn.Linear(profile_dim, 64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64, 64),
+            torch.nn.Tanh(),
+            torch.nn.Linear(64, 1)
+        )
         #######
     
     def forward(self, x):
