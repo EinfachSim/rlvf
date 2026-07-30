@@ -54,7 +54,7 @@ class PVQAnswers(BaseModel):
     )
 
 
-@ray.remote(num_gpus=1, num_cpus=16)
+@ray.remote(num_gpus=1, num_cpus=16, resources={"head": 0})
 class EnvWorker:
     def __init__(self):
         self.device = "cuda:0"
@@ -141,10 +141,6 @@ class EnvWorker:
         return float(kl.item())
 
     def _build_prompt(self, profile: list[float]) -> str:
-        value_desc = "\n".join(
-            f"  {name}: {score:+.2f}"
-            for name, score in zip(VALUE_NAMES, profile)
-        )
         return (
             "You are roleplaying as a person \n"
             "Answer the PVQ-RR questionnaire below AS this person.\n\n"
