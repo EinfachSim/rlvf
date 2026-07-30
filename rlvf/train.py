@@ -13,6 +13,17 @@ import wandb
 from rlvf.env import RLVFEnv
 from rlvf.model import HyperNetwork
 from rlvf.ppo import PPO
+import argparse
+
+# ── Args ──────────────────────────────────────────────────────────────────────
+parser = argparse.ArgumentParser()
+parser.add_argument("--num_workers", type=int, default=2)
+parser.add_argument("--episodes_per_worker", type=int, default=8)
+args = parser.parse_args()
+
+#Env
+NUM_WORKERS         = args.num_workers
+EPISODES_PER_WORKER = args.episodes_per_worker
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DEVICE          = "cuda:0"
@@ -35,8 +46,6 @@ TARGET_KL       = 0.01
 PPO_EPOCHS      = 2
 
 # Env
-NUM_WORKERS         = 2
-EPISODES_PER_WORKER = 8   # 8 × 8 = 64 total per batch
 KL_WEIGHT           = 0.1
 
 # Training
