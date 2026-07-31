@@ -97,10 +97,12 @@ class HyperNetwork(torch.nn.Module):
         for _, A in self.A.items():
             torch.nn.init.kaiming_uniform_(A, a=0, mode="fan_in")
         
-        #B is initialized as zero
+        #B is initialized as random close to zero (symmetry breaking)
         self.B = torch.nn.ParameterDict(
             {
-                k: torch.nn.Parameter(torch.zeros(num_layers, dims[k][0], rank)) for k in layer_types
+                k: torch.nn.Parameter(torch.nn.init.normal_(
+                    torch.empty(num_layers, dims[k][0], rank), mean=0.0, std=0.01
+                )) for k in layer_types
             }
         )
         #######
