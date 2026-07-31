@@ -30,7 +30,10 @@ class RLVFEnv(BaseEnv):
         kl_weight: float = 0.1,
         eval_size: int = 32,
         rng_seed: int = 42,
-        batch_size: int = None
+        batch_size: int = None,
+        num_layers: int = 32,
+        layer_types: int = 2,
+        rank: int = 8
     ):
         self.num_workers = num_workers
         self.episodes_per_worker  = episodes_per_worker
@@ -39,6 +42,10 @@ class RLVFEnv(BaseEnv):
         else:
             self.batch_size = batch_size
         self.kl_weight = kl_weight
+
+        self.num_layers = num_layers
+        self.layer_types = layer_types
+        self.rank = rank
 
         # ── Samplers ──────────────────────────────────────────────────────────
         # Separate RNGs so eval set is always reproducible regardless of
@@ -115,7 +122,7 @@ class RLVFEnv(BaseEnv):
         n = action_batch.shape[0]
 
         # Reshape z: (batch, L*T, rank) → (batch, L, T, rank)
-        z_batch = action_batch.reshape(n, 5, 2, 8)
+        z_batch = action_batch.reshape(n, self.num_layers, self.layer_types, self.rank)
 
         A_np = {k: v.detach().cpu().numpy() for k, v in A.items()}
         B_np = {k: v.detach().cpu().numpy() for k, v in B.items()}

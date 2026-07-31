@@ -108,7 +108,10 @@ env = RLVFEnv(
     num_workers         = NUM_WORKERS,
     episodes_per_worker = EPISODES_PER_WORKER,
     kl_weight           = KL_WEIGHT,
-    batch_size          = BATCH_SIZE
+    batch_size          = BATCH_SIZE,
+    layer_types=len(LAYER_TYPES),
+    rank=RANK,
+    num_layers=NUM_LAYERS
 )
 print(f"Batch size: {env.batch_size}")
 
