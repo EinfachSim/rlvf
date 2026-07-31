@@ -174,6 +174,8 @@ class EnvWorker:
         B_np: dict,
         kl_weight: float = 0.1,
     ) -> dict:
+        import time
+
         z = torch.tensor(z_np, device=self.device, dtype=torch.float32)
         A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
         B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
@@ -181,7 +183,9 @@ class EnvWorker:
         kl = 0.0  # default in case everything fails
 
         try:
+            t0 = time.perf_counter()
             self._apply_lora(z, A, B)
+            t1 = time.perf_counter()
 
             attn = self.model.model.layers[27].self_attn
             delta = (attn.q_proj.weight.data - self._base_weights["27_q"]).abs().max().item()
@@ -190,12 +194,27 @@ class EnvWorker:
 
             # KL computed first — always available even if questionnaire fails
             adapted_logits, attention_mask = self._get_adapted_logits()
+            t2 = time.perf_counter()
+
             kl = self._compute_kl(adapted_logits, attention_mask)
+            t3 = time.perf_counter()
 
             answers = self._answer_questionnaire(profile)
+            t4 = time.perf_counter()
+
             score = self._score(answers, profile)
             reward = score - kl_weight * kl
+            t5 = time.perf_counter()
 
+            print(
+                f"[Timing ep={adapter_id}] "
+                f"lora={t1-t0:.2f}s | "
+                f"logits={t2-t1:.2f}s | "
+                f"kl={t3-t2:.2f}s | "
+                f"outlines={t4-t3:.2f}s | "
+                f"score={t5-t4:.2f}s | "
+                f"total={t5-t0:.2f}s"
+            )
             print(f"[Diag Episode End] score={score}, kl={kl}, reward={reward}")
 
             return {
