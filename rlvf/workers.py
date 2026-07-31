@@ -157,6 +157,7 @@ class EnvWorker:
             prompt,
             output_type=PVQAnswers,
             max_new_tokens=600,
+            repetition_penalty=1.3
         )
         res = PVQAnswers.model_validate_json(json_str)
         return {f"q{i+1}": min(max(int(val), 1), 6) for i, val in enumerate(res.answers)}
@@ -220,11 +221,13 @@ class EnvWorker:
                     kl = self._compute_kl(adapted_logits, attention_mask)
                 except Exception:
                     kl = 0.0
+            reward = -kl_weight * kl
+            print(f"[Diag Episode End] score={0}, kl={kl}, reward={reward}")
             return {
                 "adapter_id": adapter_id,
                 "kl":         kl,
                 "score":      0.0,
-                "reward":     -10.0,
+                "reward":     reward,
                 "error":      str(e),
             }
 
