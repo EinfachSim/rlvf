@@ -193,6 +193,13 @@ class EnvWorker:
 
         try:
             self._apply_lora(z, A, B)
+
+            # Diagnostic: check if weights actually changed
+            attn = self.model.model.layers[27].self_attn
+            delta = (attn.q_proj.weight.data - self._base_weights["27_q"]).abs().max().item()
+            print(f"[Diag] max weight delta layer 27 q: {delta:.6f}")
+
+
             adapted_logits, attention_mask = self._get_adapted_logits()
 
             kl = self._compute_kl(adapted_logits, attention_mask)

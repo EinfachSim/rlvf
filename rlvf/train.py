@@ -77,7 +77,7 @@ wandb.init(
 )
 
 # ── Init Ray ──────────────────────────────────────────────────────────────────
-ray.init(address="auto", resources={"head": 1})
+ray.init(address="auto")
 print(f"Ray cluster resources: {ray.cluster_resources()}")
 
 # ── Init HyperNetwork on GPU ──────────────────────────────────────────────────
