@@ -184,6 +184,8 @@ class EnvWorker:
         A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
         B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
 
+        kl = 0.0  # default in case everything fails
+
         try:
             self._apply_lora(z, A, B)
 
@@ -192,8 +194,10 @@ class EnvWorker:
             print(f"[Diag] max weight delta layer 27 q: {delta:.6f}")
             print(f"[Diag] z mean abs: {z.abs().mean().item():.6f}")
 
+            # KL computed first — always available even if questionnaire fails
             adapted_logits, attention_mask = self._get_adapted_logits()
             kl = self._compute_kl(adapted_logits, attention_mask)
+
             answers = self._answer_questionnaire(profile)
             score = self._score(answers, profile)
             reward = score - kl_weight * kl
@@ -209,11 +213,18 @@ class EnvWorker:
 
         except Exception as e:
             print(f"[EnvWorker] Episode {adapter_id} failed: {e}")
+            # Try to get KL if not yet computed
+            if kl == 0.0:
+                try:
+                    adapted_logits, attention_mask = self._get_adapted_logits()
+                    kl = self._compute_kl(adapted_logits, attention_mask)
+                except Exception:
+                    kl = 0.0
             return {
                 "adapter_id": adapter_id,
-                "kl":         0.0,
+                "kl":         kl,
                 "score":      0.0,
-                "reward":     0.0,
+                "reward":     -10.0,
                 "error":      str(e),
             }
 
