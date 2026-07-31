@@ -55,7 +55,7 @@ class PVQAnswers(BaseModel):
     )
 
 
-@ray.remote(num_gpus=1, num_cpus=8)
+@ray.remote(num_gpus=1, num_cpus=16)
 class EnvWorker:
     def __init__(self):
         self.device = "cuda:0"
@@ -183,6 +183,8 @@ class EnvWorker:
         z = torch.tensor(z_np, device=self.device, dtype=torch.float32)
         A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
         B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
+
+        print(f"[Diag] adapter_id={adapter_id}, profile[:3]={profile[:3]}")
 
         try:
             self._apply_lora(z, A, B)
