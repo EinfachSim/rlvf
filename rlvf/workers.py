@@ -4,7 +4,8 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import numpy as np
 import outlines
-import outlines.generate
+from outlines import Generator
+from outlines.types import regex
 import fcntl
 
 MODEL_PATH  = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/models/Mistral-7B-v0.3"
@@ -74,7 +75,7 @@ class EnvWorker:
 
         print("[EnvWorker] Initializing Outlines regex generator...")
         outlines_model = outlines.from_transformers(self.model, self.tokenizer)
-        self.generator = outlines.generate.regex(outlines_model, PVQ_PATTERN)
+        self.generator = Generator(outlines_model, regex(PVQ_PATTERN))
 
         print(f"[EnvWorker] Loading base logits from {DATA_PATH}...")
         data = torch.load(DATA_PATH, map_location=self.device)
