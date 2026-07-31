@@ -52,7 +52,7 @@ KL_WEIGHT           = 0.1
 # Training
 TOTAL_STEPS     = 1000
 EVAL_EVERY      = 10
-SAVE_EVERY      = 20
+SAVE_EVERY      = 10
 LOG_EVERY       = 1
 
 # ── Init WandB ────────────────────────────────────────────────────────────────
