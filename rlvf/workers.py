@@ -1,11 +1,10 @@
-import json
 import ray
 import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import numpy as np
-from pydantic import BaseModel, Field, conlist
 import outlines
+import outlines.generate
 import fcntl
 
 MODEL_PATH  = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/models/Mistral-7B-v0.3"
@@ -48,11 +47,8 @@ SCORING_KEY = {
     "Benevolence-Dependability":    [19, 27, 55],
 }
 
-# ── Pydantic Schema for Structured Output ────────────────────────────────────
-class PVQAnswers(BaseModel):
-    answers: conlist(int, min_length=57, max_length=57) = Field(
-        ..., description="List of 57 ratings from 1 to 6"
-    )
+# ── Regex for structured output — exactly 57 answers in range [1-6] ──────────
+PVQ_PATTERN = r"[1-6](,[1-6]){56}"
 
 
 @ray.remote(num_gpus=1, num_cpus=8)
@@ -76,8 +72,9 @@ class EnvWorker:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        print("[EnvWorker] Initializing Outlines model wrapper...")
-        self.outlines_model = outlines.from_transformers(self.model, self.tokenizer)
+        print("[EnvWorker] Initializing Outlines regex generator...")
+        outlines_model = outlines.from_transformers(self.model, self.tokenizer)
+        self.generator = outlines.generate.regex(outlines_model, PVQ_PATTERN)
 
         print(f"[EnvWorker] Loading base logits from {DATA_PATH}...")
         data = torch.load(DATA_PATH, map_location=self.device)
@@ -153,14 +150,9 @@ class EnvWorker:
 
     def _answer_questionnaire(self, profile: list[float]) -> dict:
         prompt = self._build_prompt(profile)
-        json_str = self.outlines_model(
-            prompt,
-            output_type=PVQAnswers,
-            max_new_tokens=250,
-            repetition_penalty=1.3
-        )
-        res = PVQAnswers.model_validate_json(json_str)
-        return {f"q{i+1}": min(max(int(val), 1), 6) for i, val in enumerate(res.answers)}
+        result = self.generator(prompt, max_new_tokens=200, repetition_penalty=1.3)
+        answers = [int(x) for x in result.split(",")]
+        return {f"q{i+1}": val for i, val in enumerate(answers)}
 
     def _score(self, answers: dict, profile: list[float]) -> float:
         answered = np.array([answers[f"q{i}"] for i in range(1, 58)], dtype=float)
@@ -176,15 +168,11 @@ class EnvWorker:
         self,
         adapter_id: int,
         profile: list[float],
-
-
         z_np,
         A_np: dict,
         B_np: dict,
         kl_weight: float = 0.1,
     ) -> dict:
-        import time
-
         z = torch.tensor(z_np, device=self.device, dtype=torch.float32)
         A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
         B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
@@ -192,9 +180,7 @@ class EnvWorker:
         kl = 0.0  # default in case everything fails
 
         try:
-            t0 = time.perf_counter()
             self._apply_lora(z, A, B)
-            t1 = time.perf_counter()
 
             attn = self.model.model.layers[27].self_attn
             delta = (attn.q_proj.weight.data - self._base_weights["27_q"]).abs().max().item()
@@ -203,25 +189,12 @@ class EnvWorker:
 
             # KL computed first — always available even if questionnaire fails
             adapted_logits, attention_mask = self._get_adapted_logits()
-            t2 = time.perf_counter()
-
             kl = self._compute_kl(adapted_logits, attention_mask)
-            t3 = time.perf_counter()
 
             answers = self._answer_questionnaire(profile)
-            t4 = time.perf_counter()
-
             score = self._score(answers, profile)
             reward = score - kl_weight * kl
-            t5 = time.perf_counter()
 
-            print(
-                f"[Timing ep={adapter_id}] "
-                f"lora={t1-t0:.2f}s | "
-                f"logits+kl={t2-t0:.2f}s | "
-                f"outlines={t4-t3:.2f}s | "
-                f"total={t5-t0:.2f}s"
-            )
             print(f"[Diag Episode End] score={score}, kl={kl}, reward={reward}")
 
             return {
