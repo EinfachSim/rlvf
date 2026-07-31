@@ -36,6 +36,8 @@ class RLVFEnv(BaseEnv):
         self.episodes_per_worker  = episodes_per_worker
         if not batch_size:
             self.batch_size = num_workers * episodes_per_worker
+        else:
+            self.batch_size = batch_size
         self.kl_weight = kl_weight
 
         # ── Samplers ──────────────────────────────────────────────────────────
@@ -51,7 +53,7 @@ class RLVFEnv(BaseEnv):
         # ── Ray workers ───────────────────────────────────────────────────────
         print(f"[RLVFEnv] Spawning {num_workers} workers "
               f"(batch_size={self.batch_size}, "
-              f"{episodes_per_worker} episodes/worker)...")
+              f"Approx. {episodes_per_worker} episodes/worker)...")
         self.pool = ActorPool([
             EnvWorker.remote() for _ in range(num_workers)
         ])
