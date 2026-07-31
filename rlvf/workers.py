@@ -156,7 +156,7 @@ class EnvWorker:
         json_str = self.outlines_model(
             prompt,
             output_type=PVQAnswers,
-            max_new_tokens=600,
+            max_new_tokens=250,
             repetition_penalty=1.3
         )
         res = PVQAnswers.model_validate_json(json_str)
@@ -176,6 +176,8 @@ class EnvWorker:
         self,
         adapter_id: int,
         profile: list[float],
+
+
         z_np,
         A_np: dict,
         B_np: dict,
