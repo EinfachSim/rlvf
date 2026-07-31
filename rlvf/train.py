@@ -31,7 +31,7 @@ LUSTRE          = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf"
 CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints"
 
 # HyperNetwork
-NUM_LAYERS      = 5
+NUM_LAYERS      = 32
 LAYER_TYPES     = ["q", "v"]
 DIMS            = {"q": [4096, 4096], "v": [1024, 4096]}
 PROFILE_DIM     = 19

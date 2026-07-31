@@ -13,7 +13,7 @@ DATA_PATH   = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/data/base_logits.pt"
 QUEST_PATH  = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/data/questionnaire.txt"
 LOCK_PATH   = "/tmp/rlvf_model_load.lock"
 
-TARGET_LAYERS = [27, 28, 29, 30, 31]
+TARGET_LAYERS = list(range(16,32))
 LAYER_TYPES   = ["q", "v"]
 RANK          = 8
 
