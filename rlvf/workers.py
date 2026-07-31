@@ -54,7 +54,7 @@ class PVQAnswers(BaseModel):
     )
 
 
-@ray.remote(num_gpus=1, num_cpus=16, resources={"head": 0})
+@ray.remote(num_gpus=1, num_cpus=8)
 class EnvWorker:
     def __init__(self):
         self.device = "cuda:0"
