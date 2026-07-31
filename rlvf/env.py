@@ -118,6 +118,10 @@ class RLVFEnv(BaseEnv):
 
         payloads = self._build_payloads(z_batch, states, A_np, B_np, n)
 
+        for i, p in enumerate(payloads):
+            ids = [ep["adapter_id"] for ep in p]
+            print(f"[Debug] Worker {i} gets adapter_ids: {ids}")
+
         results_nested = list(self.pool.map(
             lambda worker, payload: worker.run_episodes_serial.remote(payload),
             payloads,
