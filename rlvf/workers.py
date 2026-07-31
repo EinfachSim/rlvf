@@ -6,10 +6,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import numpy as np
 from pydantic import BaseModel, Field, conlist
 import outlines
+import fcntl
 
 MODEL_PATH  = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/models/Mistral-7B-v0.3"
 DATA_PATH   = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/data/base_logits.pt"
 QUEST_PATH  = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/data/questionnaire.txt"
+LOCK_PATH   = "/tmp/rlvf_model_load.lock"
 
 TARGET_LAYERS = [27, 28, 29, 30, 31]
 LAYER_TYPES   = ["q", "v"]
@@ -48,7 +50,6 @@ SCORING_KEY = {
 
 # ── Pydantic Schema for Structured Output ────────────────────────────────────
 class PVQAnswers(BaseModel):
-    # Enforces a list of exactly 57 integers, each constrained to [1, 6]
     answers: conlist(int, min_length=57, max_length=57) = Field(
         ..., description="List of 57 ratings from 1 to 6"
     )
@@ -59,12 +60,17 @@ class EnvWorker:
     def __init__(self):
         self.device = "cuda:0"
 
-        print(f"[EnvWorker] Loading model from {MODEL_PATH}...")
-        self.model = AutoModelForCausalLM.from_pretrained(
-            MODEL_PATH,
-            torch_dtype=torch.float16,
-        ).to(self.device)
-        self.model.eval()
+        # Serialize model loading to avoid simultaneous CPU RAM spike
+        print(f"[EnvWorker] Waiting for model load lock...")
+        with open(LOCK_PATH, "w") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            print(f"[EnvWorker] Loading model from {MODEL_PATH}...")
+            self.model = AutoModelForCausalLM.from_pretrained(
+                MODEL_PATH,
+                torch_dtype=torch.float16,
+            ).to(self.device)
+            self.model.eval()
+            print(f"[EnvWorker] Model loaded, releasing lock.")
 
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
         if self.tokenizer.pad_token is None:
@@ -75,8 +81,8 @@ class EnvWorker:
 
         print(f"[EnvWorker] Loading base logits from {DATA_PATH}...")
         data = torch.load(DATA_PATH, map_location=self.device)
-        self.base_logits  = data["logits"]   # (n_texts, seq_len, vocab_size)
-        self.domain_texts = data["texts"]    # list of AITA post strings
+        self.base_logits  = data["logits"]
+        self.domain_texts = data["texts"]
 
         with open(QUEST_PATH) as f:
             self.questionnaire_text = f.read()
@@ -124,7 +130,7 @@ class EnvWorker:
 
     def _compute_kl(self, adapted_logits, attention_mask):
         seq_len = min(self.base_logits.shape[1], adapted_logits.shape[1])
-        mask = attention_mask[:, :seq_len].bool()  # (batch, seq)
+        mask = attention_mask[:, :seq_len].bool()
 
         base = self.base_logits[:, :seq_len, :]
         adapted = adapted_logits[:, :seq_len, :]
@@ -132,47 +138,37 @@ class EnvWorker:
         p = F.softmax(base.float(), dim=-1)
         log_q = F.log_softmax(adapted.float(), dim=-1)
 
-        # Per-token KL: (batch, seq, vocab) -> (batch, seq)
         kl_per_token = F.kl_div(log_q, p, reduction="none").sum(dim=-1)
 
-        # Mask and mean over non-padding tokens only
         masked_kl = kl_per_token * mask.float()
         kl = masked_kl.sum() / mask.float().sum()
         return float(kl.item())
 
     def _build_prompt(self, profile: list[float]) -> str:
         return (
-            "You are roleplaying as a person \n"
-            "Answer the PVQ-RR questionnaire below AS this person.\n\n"
+            "You are roleplaying as a person.\n"
+            "Answer the PVQ-RR questionnaire below as this person.\n\n"
             f"{self.questionnaire_text}\n"
         )
 
     def _answer_questionnaire(self, profile: list[float]) -> dict:
         prompt = self._build_prompt(profile)
-        
-        # Outlines 1.x Call: Pass Pydantic schema and use `max_tokens`
         json_str = self.outlines_model(
             prompt,
             output_type=PVQAnswers,
             max_new_tokens=600,
         )
-        
-        # Parse JSON and validate against schema
         res = PVQAnswers.model_validate_json(json_str)
-        
-        # Map back to {"q1": val1, ..., "q57": val57}
         return {f"q{i+1}": min(max(int(val), 1), 6) for i, val in enumerate(res.answers)}
 
     def _score(self, answers: dict, profile: list[float]) -> float:
         answered = np.array([answers[f"q{i}"] for i in range(1, 58)], dtype=float)
-
         dim_means = np.array([
             answered[np.array(items) - 1].mean()
             for items in SCORING_KEY.values()
         ])
         answered_profile = dim_means - answered.mean()
         gt_profile = np.array(profile)
-
         return -float(np.mean((answered_profile - gt_profile) ** 2))
 
     def run_episode(
@@ -184,9 +180,6 @@ class EnvWorker:
         B_np: dict,
         kl_weight: float = 0.1,
     ) -> dict:
-
-        
-                
         z = torch.tensor(z_np, device=self.device, dtype=torch.float32)
         A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
         B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
@@ -194,19 +187,15 @@ class EnvWorker:
         try:
             self._apply_lora(z, A, B)
 
-            # Diagnostic: check if weights actually changed
             attn = self.model.model.layers[27].self_attn
             delta = (attn.q_proj.weight.data - self._base_weights["27_q"]).abs().max().item()
             print(f"[Diag] max weight delta layer 27 q: {delta:.6f}")
             print(f"[Diag] z mean abs: {z.abs().mean().item():.6f}")
 
-
             adapted_logits, attention_mask = self._get_adapted_logits()
-
             kl = self._compute_kl(adapted_logits, attention_mask)
             answers = self._answer_questionnaire(profile)
             score = self._score(answers, profile)
-
             reward = score - kl_weight * kl
 
             print(f"[Diag Episode End] score={score}, kl={kl}, reward={reward}")
