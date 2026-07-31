@@ -221,7 +221,7 @@ class EnvWorker:
                     kl = self._compute_kl(adapted_logits, attention_mask)
                 except Exception:
                     kl = 0.0
-            reward = -kl_weight * kl
+            reward = -kl
             print(f"[Diag Episode End] score={0}, kl={kl}, reward={reward}")
             return {
                 "adapter_id": adapter_id,
