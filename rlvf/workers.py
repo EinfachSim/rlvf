@@ -198,6 +198,7 @@ class EnvWorker:
             attn = self.model.model.layers[27].self_attn
             delta = (attn.q_proj.weight.data - self._base_weights["27_q"]).abs().max().item()
             print(f"[Diag] max weight delta layer 27 q: {delta:.6f}")
+            print(f"[Diag] z mean abs: {z.abs().mean().item():.6f}")
 
 
             adapted_logits, attention_mask = self._get_adapted_logits()

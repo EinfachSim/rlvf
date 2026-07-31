@@ -38,12 +38,12 @@ PROFILE_DIM     = 19
 RANK            = 8
 
 # PPO
-LR              = 1e-3
+LR              = 3e-4
 CLIP_RATIO      = 0.2
 VF_COEF         = 0.5
 ENT_COEF        = 0.01
-TARGET_KL       = 0.01
-PPO_EPOCHS      = 2
+TARGET_KL       = 0.1
+PPO_EPOCHS      = 10
 
 # Env
 KL_WEIGHT           = 0.1

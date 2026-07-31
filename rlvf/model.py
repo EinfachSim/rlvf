@@ -101,7 +101,7 @@ class HyperNetwork(torch.nn.Module):
         self.B = torch.nn.ParameterDict(
             {
                 k: torch.nn.Parameter(torch.nn.init.normal_(
-                    torch.empty(num_layers, dims[k][0], rank), mean=0.0, std=0.01
+                    torch.empty(num_layers, dims[k][0], rank), mean=0.0, std=0.1
                 )) for k in layer_types
             }
         )

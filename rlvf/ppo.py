@@ -55,6 +55,13 @@ class PPO:
                 approx_kl = (logprobs - logp_new).mean().item()
             if approx_kl > 1.5 * self.target_kl:
                 break
+        return {
+            "loss_pi": loss_pi.item(),
+            "loss_v": loss_v.item(),
+            "entropy": entropy.item(),
+            "approx_kl": approx_kl,
+            "update_iters": i + 1,  # how many iters before early stopping
+        }
     
     def _batch_gae(self, states, rewards):
         with torch.no_grad():
