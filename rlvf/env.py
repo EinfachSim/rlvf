@@ -109,33 +109,20 @@ class RLVFEnv(BaseEnv):
         tag: str = "TRAIN",
     ) -> torch.Tensor:
         n = action_batch.shape[0]
-        episodes_per_worker = n // self.num_workers
-        remainder           = n % self.num_workers
-
-        if remainder != 0:
-            raise ValueError(
-                f"Batch size {n} not evenly divisible by "
-                f"num_workers {self.num_workers}"
-            )
 
         # Reshape z: (batch, L*T, rank) → (batch, L, T, rank)
         z_batch = action_batch.reshape(n, 5, 2, 8)
 
-        # Serialise A and B once — same for all episodes in the batch
         A_np = {k: v.detach().cpu().numpy() for k, v in A.items()}
         B_np = {k: v.detach().cpu().numpy() for k, v in B.items()}
 
-        payloads = self._build_payloads(
-            z_batch, states, A_np, B_np, episodes_per_worker
-        )
+        payloads = self._build_payloads(z_batch, states, A_np, B_np, n)
 
-        # Fan out — one chunk per worker
         results_nested = list(self.pool.map(
             lambda worker, payload: worker.run_episodes_serial.remote(payload),
             payloads,
         ))
 
-        # Flatten and sort by adapter_id to match action_batch order
         results = [r for chunk in results_nested for r in chunk]
         results.sort(key=lambda r: r["adapter_id"])
 
@@ -148,17 +135,22 @@ class RLVFEnv(BaseEnv):
 
     def _build_payloads(
         self,
-        z_batch,        # (batch, L, T, rank) tensor
-        states,         # (batch, 19) tensor
+        z_batch,
+        states,
         A_np: dict,
         B_np: dict,
-        episodes_per_worker: int,
+        n: int,
     ) -> list[list[dict]]:
+        # Distribute n episodes as evenly as possible across workers
+        base  = n // self.num_workers
+        extra = n % self.num_workers  # first `extra` workers get one more episode
+
         payloads = []
+        idx = 0
         for w in range(self.num_workers):
+            chunk_size = base + (1 if w < extra else 0)
             chunk = []
-            for e in range(episodes_per_worker):
-                idx = w * episodes_per_worker + e
+            for _ in range(chunk_size):
                 chunk.append({
                     "adapter_id": idx,
                     "profile":    states[idx].tolist(),
@@ -167,6 +159,7 @@ class RLVFEnv(BaseEnv):
                     "B_np":       B_np,
                     "kl_weight":  self.kl_weight,
                 })
+                idx += 1
             payloads.append(chunk)
         return payloads
 
