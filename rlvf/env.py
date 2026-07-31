@@ -30,11 +30,13 @@ class RLVFEnv(BaseEnv):
         kl_weight: float = 0.1,
         eval_size: int = 32,
         rng_seed: int = 42,
+        batch_size: int = None
     ):
-        self.num_workers          = num_workers
+        self.num_workers = num_workers
         self.episodes_per_worker  = episodes_per_worker
-        self.batch_size           = num_workers * episodes_per_worker
-        self.kl_weight            = kl_weight
+        if not batch_size:
+            self.batch_size = num_workers * episodes_per_worker
+        self.kl_weight = kl_weight
 
         # ── Samplers ──────────────────────────────────────────────────────────
         # Separate RNGs so eval set is always reproducible regardless of

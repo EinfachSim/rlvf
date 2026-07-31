@@ -18,7 +18,7 @@ import argparse
 # ── Args ──────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
 parser.add_argument("--num_workers", type=int, default=2)
-parser.add_argument("--episodes_per_worker", type=int, default=8)
+parser.add_argument("--episodes_per_worker", type=int, default=16)
 args = parser.parse_args()
 
 #Env
@@ -44,6 +44,7 @@ VF_COEF         = 0.5
 ENT_COEF        = 0.01
 TARGET_KL       = 0.3
 PPO_EPOCHS      = 10
+BATCH_SIZE      = 64
 
 # Env
 KL_WEIGHT           = 0.1
@@ -107,6 +108,7 @@ env = RLVFEnv(
     num_workers         = NUM_WORKERS,
     episodes_per_worker = EPISODES_PER_WORKER,
     kl_weight           = KL_WEIGHT,
+    batch_size          = BATCH_SIZE
 )
 print(f"Batch size: {env.batch_size}")
 

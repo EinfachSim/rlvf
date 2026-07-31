@@ -13,7 +13,7 @@ DATA_PATH   = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/data/base_logits.pt"
 QUEST_PATH  = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/data/questionnaire.txt"
 LOCK_PATH   = "/tmp/rlvf_model_load.lock"
 
-TARGET_LAYERS = list(range(16,32))
+TARGET_LAYERS = list(range(32))
 LAYER_TYPES   = ["q", "v"]
 RANK          = 8
 
@@ -183,8 +183,6 @@ class EnvWorker:
         z = torch.tensor(z_np, device=self.device, dtype=torch.float32)
         A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
         B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
-
-        print(f"[Diag] adapter_id={adapter_id}, profile[:3]={profile[:3]}")
 
         try:
             self._apply_lora(z, A, B)
