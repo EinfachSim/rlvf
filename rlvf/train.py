@@ -154,12 +154,13 @@ for step in range(start_step, TOTAL_STEPS):
     # 2. Sample actions from policy
     with torch.no_grad():
         actions, log_probs, A, B = policy.get_action_and_logprob(states)
-        actions   = actions.detach()
+        action_b, action_d = actions
+        action_b, action_d = action_b.detach(), action_d.detach()
         log_probs = log_probs.detach()
 
     # 3. Fan out to environment workers
     rewards = env.step_batch(
-        action_batch = actions.cpu(),
+        action_batch = (action_b.cpu(), action_d.cpu()),
         states       = states.cpu(),
         A            = A,
         B            = B,
@@ -168,7 +169,7 @@ for step in range(start_step, TOTAL_STEPS):
     # 4. PPO update
     batch = (
         states.detach(),
-        actions.detach(),
+        (action_b.detach(), action_d.detach()),
         rewards.detach(),
         log_probs.detach(),
     )
@@ -182,8 +183,10 @@ for step in range(start_step, TOTAL_STEPS):
             "train/reward_min":  rewards.min().item(),
             "train/reward_max":  rewards.max().item(),
             # Action diagnostics
-            "diag/z_mean":       actions.mean().item(),
-            "diag/z_std":        actions.std().item(),
+            "diag/b_mean":       action_b.mean().item(),
+            "diag/b_std":        action_b.std().item(),
+            "diag/d_mean":       action_d.mean().item(),
+            "diag/d_std":        action_d.std().item(),
             "diag/logp_old":     log_probs.mean().item(),
             "step": step,
         }
@@ -225,7 +228,8 @@ for step in range(start_step, TOTAL_STEPS):
             f"logp_new: {ppo_info.get('logp_new_mean', 0):.4f} | "
             f"ratio: {ppo_info.get('ratio_mean', 0):.4f} | "
             f"grad_norm: {ppo_info.get('grad_norm', 0):.4f} | "
-            f"z_mean: {actions.mean().item():.4f}"
+            f"b_mean: {action_b.mean().item():.4f}"
+            f"d_mean: {action_d.mean().item():.4f}"
         )
 
     # 6. Eval
@@ -233,9 +237,10 @@ for step in range(start_step, TOTAL_STEPS):
         eval_states = env.eval_profiles.to(DEVICE)
         with torch.no_grad():
             eval_actions, _, eval_A, eval_B = policy.get_action_and_logprob(eval_states)
-            eval_actions = eval_actions.detach()
+            eval_action_b, eval_action_d = eval_actions
+            eval_action_b, eval_action_d = eval_action_b.detach(), eval_action_d.detach()
         eval_metrics = env.eval_batch(
-            action_batch = eval_actions.cpu(),
+            action_batch = (eval_action_b.cpu(), eval_action_d.cpu()),
             A            = eval_A,
             B            = eval_B,
         )

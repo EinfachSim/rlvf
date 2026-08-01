@@ -75,7 +75,7 @@ class RLVFEnv(BaseEnv):
 
     def step_batch(
         self,
-        action_batch: torch.Tensor,   # (batch_size, L*T, rank)
+        action_batch: tuple[torch.Tensor],   # (2, batch_size, L*T, rank)
         states: torch.Tensor,         # (batch_size, 19)
         A: dict,                      # {"q": (L, rank, d_in), "v": ...}
         B: dict,                      # {"q": (L, d_out, rank), "v": ...}
@@ -119,15 +119,16 @@ class RLVFEnv(BaseEnv):
         B: dict,
         tag: str = "TRAIN",
     ) -> torch.Tensor:
-        n = action_batch.shape[0]
+        n = action_batch.shape[1]
 
-        # Reshape z: (batch, L*T, rank) → (batch, L, T, rank)
-        z_batch = action_batch.reshape(n, self.num_layers, self.layer_types, self.rank)
+        b_batch = action_batch[0].reshape(n, self.num_layers, self.layer_types, self.rank)
+        d_batch = action_batch[1].reshape(n, self.num_layers, self.layer_types, self.rank)
+
 
         A_np = {k: v.detach().cpu().numpy() for k, v in A.items()}
         B_np = {k: v.detach().cpu().numpy() for k, v in B.items()}
 
-        payloads = self._build_payloads(z_batch, states, A_np, B_np, n)
+        payloads = self._build_payloads(b_batch, d_batch, states, A_np, B_np, n)
 
         for i, p in enumerate(payloads):
             ids = [ep["adapter_id"] for ep in p]
@@ -150,7 +151,8 @@ class RLVFEnv(BaseEnv):
 
     def _build_payloads(
         self,
-        z_batch,
+        b_batch,
+        d_batch,
         states,
         A_np: dict,
         B_np: dict,
@@ -169,7 +171,8 @@ class RLVFEnv(BaseEnv):
                 chunk.append({
                     "adapter_id": idx,
                     "profile":    states[idx].tolist(),
-                    "z_np":       z_batch[idx].cpu().numpy(),
+                    "b_np":       b_batch[idx].cpu().numpy(),
+                    "d_np":       d_batch[idx].cpu().numpy(),
                     "A_np":       A_np,
                     "B_np":       B_np,
                     "kl_weight":  self.kl_weight,

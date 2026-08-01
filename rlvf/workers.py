@@ -95,14 +95,15 @@ class EnvWorker:
             self._base_weights[f"{layer_idx}_q"] = attn.q_proj.weight.data.clone()
             self._base_weights[f"{layer_idx}_v"] = attn.v_proj.weight.data.clone()
 
-    def _apply_lora(self, z, A, B):
+    def _apply_vera(self, b, d, A, B):
         for li, layer_idx in enumerate(TARGET_LAYERS):
             attn = self.model.model.layers[layer_idx].self_attn
             for ti, t in enumerate(LAYER_TYPES):
-                z_lt    = z[li, ti].to(torch.float32)
+                b_lt    = b[li, ti].to(torch.float32)
+                d_lt =  d[li, ti].to(torch.float32)
                 A_lt    = A[t][li].to(self.device)
                 B_lt    = B[t][li].to(self.device)
-                W_delta = B_lt @ torch.diag(z_lt) @ A_lt
+                W_delta = torch.diag(b_lt) @ B_lt @ torch.diag(d_lt) @ A_lt
                 if t == "q":
                     attn.q_proj.weight.data += W_delta.to(torch.float16)
                 else:
@@ -169,14 +170,16 @@ class EnvWorker:
         self,
         adapter_id: int,
         profile: list[float],
-        z_np,
+        b_np,
+        d_np,
         A_np: dict,
         B_np: dict,
         kl_weight: float = 0.1,
     ) -> dict:
         import time
 
-        z = torch.tensor(z_np, device=self.device, dtype=torch.float32)
+        b = torch.tensor(b_np, device=self.device, dtype=torch.float32)
+        d = torch.tensor(d_np, device=self.device, dtype=torch.float32)
         A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
         B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
 
@@ -184,13 +187,14 @@ class EnvWorker:
 
         try:
             t0 = time.perf_counter()
-            self._apply_lora(z, A, B)
+            self._apply_vera(b,d, A, B)
             t1 = time.perf_counter()
 
             attn = self.model.model.layers[27].self_attn
             delta = (attn.q_proj.weight.data - self._base_weights["27_q"]).abs().max().item()
             print(f"[Diag] max weight delta layer 27 q: {delta:.6f}")
-            print(f"[Diag] z mean abs: {z.abs().mean().item():.6f}")
+            print(f"[Diag] b mean abs: {b.abs().mean().item():.6f}")
+            print(f"[Diag] d mean abs: {d.abs().mean().item():.6f}")
 
             # KL computed first — always available even if questionnaire fails
             adapted_logits, attention_mask = self._get_adapted_logits()

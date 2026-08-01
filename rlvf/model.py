@@ -97,10 +97,20 @@ class HyperNetwork(torch.nn.Module):
         self.head_mean = torch.nn.Linear(head_in_dim, rank)
         self.head_log_std = torch.nn.Linear(head_in_dim, rank)
 
-        torch.nn.init.orthogonal_(self.head_mean.weight, gain=0.01)
-        torch.nn.init.zeros_(self.head_mean.bias)
-        torch.nn.init.constant_(self.head_log_std.weight, 0)
-        torch.nn.init.constant_(self.head_log_std.bias, -1.0)
+        self.b_head_mean = torch.nn.Linear(head_in_dim, rank)
+        self.b_head_log_std = torch.nn.Linear(head_in_dim, rank)
+        self.d_head_mean = torch.nn.Linear(head_in_dim, rank)
+        self.d_head_log_std = torch.nn.Linear(head_in_dim, rank)
+
+        torch.nn.init.orthogonal_(self.b_head_mean.weight, gain=0.01)
+        torch.nn.init.zeros_(self.b_head_mean.bias)
+        torch.nn.init.constant_(self.b_head_log_std.weight, 0)
+        torch.nn.init.constant_(self.b_head_log_std.bias, -1.0)
+
+        torch.nn.init.orthogonal_(self.d_head_mean.weight, gain=0.01)
+        torch.nn.init.zeros_(self.d_head_mean.bias)
+        torch.nn.init.constant_(self.d_head_log_std.weight, 0)
+        torch.nn.init.constant_(self.d_head_log_std.bias, -1.0)
 
         # VALUE HEAD
         self.value_head = torch.nn.Sequential(
@@ -130,21 +140,45 @@ class HyperNetwork(torch.nn.Module):
         z_logstd = self.head_log_std(x)
         z_logstd = torch.clamp(z_logstd, -20, 2)
 
-        return z_mean, z_logstd
+        b_mean = self.b_head_mean(x)
+        b_logstd = self.b_head_log_std(x)
+        b_logstd = torch.clamp(b_logstd, -20, 2)
+
+        d_mean = self.d_head_mean(x)
+        d_logstd = self.d_head_log_std(x)
+        d_logstd = torch.clamp(d_logstd, -20, 2)
+
+        return (b_mean, d_mean), (b_logstd, d_logstd)
 
     def get_action_and_logprob(self, x, action=None, use_action=False):
-        z_mean, z_logstd = self.forward(x)
-        z_std = z_logstd.exp()
-        dist = Independent(Normal(z_mean, z_std), 2)
+        means, logstds = self.forward(x)
+        b_mean, d_mean = means
+        b_log_std, d_log_std = logstds
+
+        b_std = b_log_std.exp()
+        dist_b = Independent(Normal(b_mean, b_std), 2)
+
+        d_std = d_log_std.exp()
+        dist_d = Independent(Normal(d_mean, d_std), 2)
 
         if use_action:
-            # action shape: (batch_size, num_layers*num_types, rank)
-            log_prob = dist.log_prob(action) / self.action_dim  # (batch_size,)
-            return log_prob, dist.entropy().mean()
+            # action shape: (2, batch_size, num_layers*num_types, rank)
+            b, d = action
+            log_prob_b = dist_b.log_prob(b)  # (batch_size,)
+            log_prob_d = dist_d.log_prob(d)
+            log_prob = (log_prob_b + log_prob_d) / (2*self.action_dim)
 
-        z = dist.rsample()
-        log_prob = dist.log_prob(z) / self.action_dim  # (batch_size,)
-        return z, log_prob, self.A, self.B
+            entropy = (dist_b.entropy() + dist_d.entropy()).mean()
+            return log_prob, entropy
+
+        b = dist_b.rsample()
+        d = dist_d.rsample()
+
+        log_prob_b = dist_b.log_prob(b)  # (batch_size,)
+        log_prob_d = dist_d.log_prob(d)
+        log_prob = (log_prob_b + log_prob_d) / (2*self.action_dim)
+
+        return (b,d), log_prob, self.A, self.B
 
     def get_value(self, x):
         return self.value_head(x)
