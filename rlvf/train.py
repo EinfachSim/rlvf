@@ -201,23 +201,6 @@ for step in range(start_step, TOTAL_STEPS):
                 if isinstance(v, torch.Tensor):
                     v = v.item()
                 log_dict[f"ppo/{k}"] = v
-        # Log A and B gradient norms and weight norms
-        with torch.no_grad():
-            for t in LAYER_TYPES:
-                A = policy.A[t]
-                B = policy.B[t]
-                        
-                # Weight norms — if these don't change across steps, A/B are frozen
-                log_dict[f"diag/A_{t}_norm"] = A.norm().item()
-                log_dict[f"diag/B_{t}_norm"] = B.norm().item()
-                        
-                # Gradient norms — if these are 0, A/B receive no gradient at all
-                if A.grad is not None:
-                    log_dict[f"diag/A_{t}_grad_norm"] = A.grad.norm().item()
-                    log_dict[f"diag/B_{t}_grad_norm"] = B.grad.norm().item()
-                else:
-                    log_dict[f"diag/A_{t}_grad_norm"] = 0.0
-                    log_dict[f"diag/B_{t}_grad_norm"] = 0.0
 
         wandb.log(log_dict, step=step)
 

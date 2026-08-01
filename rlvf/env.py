@@ -119,7 +119,7 @@ class RLVFEnv(BaseEnv):
         B: dict,
         tag: str = "TRAIN",
     ) -> torch.Tensor:
-        n = action_batch.shape[1]
+        n = action_batch[0].shape[0]
 
         b_batch = action_batch[0].reshape(n, self.num_layers, self.layer_types, self.rank)
         d_batch = action_batch[1].reshape(n, self.num_layers, self.layer_types, self.rank)
