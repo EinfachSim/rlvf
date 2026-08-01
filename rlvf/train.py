@@ -37,11 +37,11 @@ PROFILE_DIM     = 19
 RANK            = 8
 
 # PPO
-LR              = 1e-4
-CLIP_RATIO      = 0.2
+LR              = 5e-5
+CLIP_RATIO      = 0.15
 VF_COEF         = 0.5
 ENT_COEF        = 0.0
-TARGET_KL       = 0.3
+TARGET_KL       = 0.2
 PPO_EPOCHS      = 10
 BATCH_SIZE      = 64
 
