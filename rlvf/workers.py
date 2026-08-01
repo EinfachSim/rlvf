@@ -103,7 +103,9 @@ class EnvWorker:
                 d_lt =  d[li, ti].to(torch.float32)
                 A_lt    = A[t][li].to(self.device)
                 B_lt    = B[t][li].to(self.device)
-                W_delta = torch.diag(b_lt) @ B_lt @ torch.diag(d_lt) @ A_lt
+                scaled_A = d_lt.unsqueeze(1) * A_lt
+                scaled_B = b_lt.unsqueeze(0) * B_lt
+                W_delta = scaled_B@scaled_A
                 if t == "q":
                     attn.q_proj.weight.data += W_delta.to(torch.float16)
                 else:

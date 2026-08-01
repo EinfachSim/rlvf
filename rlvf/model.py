@@ -108,8 +108,6 @@ class HyperNetwork(torch.nn.Module):
 
 
         # HEAD
-        self.head_mean = torch.nn.Linear(head_in_dim, rank)
-        self.head_log_std = torch.nn.Linear(head_in_dim, rank)
 
         self.b_head_mean = torch.nn.Linear(head_in_dim, rank)
         self.b_head_log_std = torch.nn.Linear(head_in_dim, rank)
