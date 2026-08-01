@@ -169,6 +169,7 @@ class HyperNetwork(torch.nn.Module):
 
         z = dist.rsample()
         log_prob = dist.log_prob(z)
+        log_prob = log_prob.mean(dim=-1)
         return z, log_prob, self.A, self.B
 
     def get_value(self, x):
