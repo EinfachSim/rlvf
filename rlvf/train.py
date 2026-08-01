@@ -46,7 +46,7 @@ PPO_EPOCHS      = 10
 BATCH_SIZE      = 64
 
 # Env
-KL_WEIGHT       = 0.1
+KL_WEIGHT       = 0.0
 
 # Training
 TOTAL_STEPS     = 1000
