@@ -96,7 +96,7 @@ class RLVFEnv(BaseEnv):
         Run a batch of episodes on the fixed eval profiles.
         Returns diagnostics dict — call every N steps, no PPO update.
         """
-        assert action_batch.shape[0] == len(self.eval_profiles), \
+        assert action_batch[0].shape[0] == len(self.eval_profiles), \
             f"eval action_batch must have {len(self.eval_profiles)} rows"
 
         rewards = self._run_pool(
