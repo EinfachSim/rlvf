@@ -148,10 +148,6 @@ class HyperNetwork(torch.nn.Module):
         x = self.mlp2(x)
         x = self.mlp3(x)
 
-        z_mean = self.head_mean(x)
-        z_logstd = self.head_log_std(x)
-        z_logstd = torch.clamp(z_logstd, -20, 2)
-
         b_mean = self.b_head_mean(x)
         b_logstd = self.b_head_log_std(x)
         b_logstd = torch.clamp(b_logstd, -20, 2)
