@@ -1,10 +1,11 @@
 import torch
 from torch.distributions import Normal, Independent
 """
-ALL ARCHITECTURE IN HERE IS MOSTLY INSPIRED BY, ADAPTED AND SIMPLIFIED FROM ZHyper
-
+Architecture inspired by, adapted and simplified from ZHyper
 https://arxiv.org/pdf/2510.19733
-
+ 
+Adapter generation follows VeRA (Kopiczko et al., ICLR 2024)
+https://arxiv.org/abs/2310.11454
 """
 
 class Mixer(torch.nn.Module):
@@ -80,18 +81,31 @@ class HyperNetwork(torch.nn.Module):
         self.mlp2 = MLPResidual(context_dim)
         self.mlp3 = MLPProjection(in_dim=context_dim, out_dim=head_in_dim)
 
-        # A and B
+        # ── Frozen random A and B (VeRA-style) ────────────────────────────────
+        # Kaiming uniform init as in the VeRA paper.
+        # requires_grad=False, these are never updated by the optimizer.
         self.A = torch.nn.ParameterDict(
-            {k: torch.nn.Parameter(torch.empty(num_layers, rank, dims[k][1])) for k in layer_types}
+            {
+                k: torch.nn.Parameter(
+                    torch.empty(num_layers, rank, dims[k][1]), requires_grad=False
+                )
+                for k in layer_types
+            }
         )
         for _, A in self.A.items():
-            torch.nn.init.kaiming_uniform_(A, a=0, mode="fan_in")
-
+            torch.nn.init.kaiming_uniform_(A)
+ 
         self.B = torch.nn.ParameterDict(
-            {k: torch.nn.Parameter(torch.nn.init.normal_(
-                torch.empty(num_layers, dims[k][0], rank), mean=0.0, std=0.05
-            )) for k in layer_types}
+            {
+                k: torch.nn.Parameter(
+                    torch.empty(num_layers, dims[k][0], rank), requires_grad=False
+                )
+                for k in layer_types
+            }
         )
+        for _, B in self.B.items():
+            torch.nn.init.kaiming_uniform_(B)
+
 
         # HEAD
         self.head_mean = torch.nn.Linear(head_in_dim, rank)
