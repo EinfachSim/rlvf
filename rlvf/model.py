@@ -110,19 +110,19 @@ class HyperNetwork(torch.nn.Module):
         # HEAD
 
         self.b_head_mean = torch.nn.Linear(head_in_dim, rank)
-        self.b_head_log_std = torch.nn.Linear(head_in_dim, rank)
         self.d_head_mean = torch.nn.Linear(head_in_dim, rank)
-        self.d_head_log_std = torch.nn.Linear(head_in_dim, rank)
-
         torch.nn.init.orthogonal_(self.b_head_mean.weight, gain=0.01)
         torch.nn.init.zeros_(self.b_head_mean.bias)
-        torch.nn.init.constant_(self.b_head_log_std.weight, 0)
-        torch.nn.init.constant_(self.b_head_log_std.bias, -1.0)
 
         torch.nn.init.orthogonal_(self.d_head_mean.weight, gain=0.01)
         torch.nn.init.zeros_(self.d_head_mean.bias)
-        torch.nn.init.constant_(self.d_head_log_std.weight, 0)
-        torch.nn.init.constant_(self.d_head_log_std.bias, -1.0)
+
+        self.log_std_d = torch.nn.Parameter(
+            torch.full((self.num_layers * self.num_types, rank), -1.0)
+        )
+        self.log_std_b = torch.nn.Parameter(
+           torch.full((self.num_layers * self.num_types, rank), -1.0)
+        )
 
         # VALUE HEAD
         self.value_head = torch.nn.Sequential(
@@ -149,12 +149,10 @@ class HyperNetwork(torch.nn.Module):
         x = self.mlp3(x)
 
         b_mean = self.b_head_mean(x)
-        b_logstd = self.b_head_log_std(x)
-        b_logstd = torch.clamp(b_logstd, -20, 2)
+        b_logstd = torch.clamp(self.log_std_b, -3, -1).unsqueeze(0).expand(batch_size, -1, -1)
 
         d_mean = self.d_head_mean(x)
-        d_logstd = self.d_head_log_std(x)
-        d_logstd = torch.clamp(d_logstd, -20, 2)
+        d_logstd = torch.clamp(self.log_std_d, -3, -1).unsqueeze(0).expand(batch_size, -1, -1)
 
         return (b_mean, d_mean), (b_logstd, d_logstd)
 
