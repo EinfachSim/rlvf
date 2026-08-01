@@ -49,7 +49,7 @@ class PPO:
 
             # Early stopping
             with torch.no_grad():
-                approx_kl = (logprobs - logp_new).mean().item()
+                approx_kl = (0.5 * (logprobs - logp_new)**2).item()
             if approx_kl > 1.5 * self.target_kl:
                 break
 

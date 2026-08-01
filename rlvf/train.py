@@ -41,7 +41,7 @@ LR              = 5e-5
 CLIP_RATIO      = 0.15
 VF_COEF         = 0.5
 ENT_COEF        = 0.0
-TARGET_KL       = 0.2
+TARGET_KL       = 0.05
 PPO_EPOCHS      = 10
 BATCH_SIZE      = 64
 
@@ -89,6 +89,10 @@ policy = HyperNetwork(
     profile_dim = PROFILE_DIM,
     rank        = RANK,
 ).to(DEVICE)
+
+#Value head warm start
+with torch.no_grad():
+    policy.value_head[-1].bias.fill_(-2.0)
 
 # ── Init PPO ──────────────────────────────────────────────────────────────────
 ppo = PPO(
@@ -169,6 +173,25 @@ for step in range(start_step, TOTAL_STEPS):
         log_probs.detach(),
     )
     ppo_info = ppo.update(batch)
+
+    # Log A and B gradient norms and weight norms
+    if step % LOG_EVERY == 0:
+        with torch.no_grad():
+            for t in LAYER_TYPES:
+                A = policy.A[t]
+                B = policy.B[t]
+                
+                # Weight norms — if these don't change across steps, A/B are frozen
+                log_dict[f"diag/A_{t}_norm"] = A.norm().item()
+                log_dict[f"diag/B_{t}_norm"] = B.norm().item()
+                
+                # Gradient norms — if these are 0, A/B receive no gradient at all
+                if A.grad is not None:
+                    log_dict[f"diag/A_{t}_grad_norm"] = A.grad.norm().item()
+                    log_dict[f"diag/B_{t}_grad_norm"] = B.grad.norm().item()
+                else:
+                    log_dict[f"diag/A_{t}_grad_norm"] = 0.0
+                    log_dict[f"diag/B_{t}_grad_norm"] = 0.0
 
     # 5. Logging
     if step % LOG_EVERY == 0:
