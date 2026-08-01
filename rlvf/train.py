@@ -21,7 +21,6 @@ parser.add_argument("--num_workers", type=int, default=2)
 parser.add_argument("--episodes_per_worker", type=int, default=16)
 args = parser.parse_args()
 
-#Env
 NUM_WORKERS         = args.num_workers
 EPISODES_PER_WORKER = args.episodes_per_worker
 
@@ -47,7 +46,7 @@ PPO_EPOCHS      = 10
 BATCH_SIZE      = 64
 
 # Env
-KL_WEIGHT           = 0.1
+KL_WEIGHT       = 0.1
 
 # Training
 TOTAL_STEPS     = 1000
@@ -61,19 +60,19 @@ wandb.init(
     project="rlvf-pvq-alignment",
     name="mistral-7b-hypernetwork-ppo",
     config={
-        "num_layers": NUM_LAYERS,
-        "layer_types": LAYER_TYPES,
-        "rank": RANK,
-        "lr": LR,
-        "clip_ratio": CLIP_RATIO,
-        "vf_coef": VF_COEF,
-        "ent_coef": ENT_COEF,
-        "target_kl": TARGET_KL,
-        "ppo_epochs": PPO_EPOCHS,
-        "num_workers": NUM_WORKERS,
-        "episodes_per_worker": EPISODES_PER_WORKER,
-        "kl_weight": KL_WEIGHT,
-        "total_steps": TOTAL_STEPS,
+        "num_layers":           NUM_LAYERS,
+        "layer_types":          LAYER_TYPES,
+        "rank":                 RANK,
+        "lr":                   LR,
+        "clip_ratio":           CLIP_RATIO,
+        "vf_coef":              VF_COEF,
+        "ent_coef":             ENT_COEF,
+        "target_kl":            TARGET_KL,
+        "ppo_epochs":           PPO_EPOCHS,
+        "num_workers":          NUM_WORKERS,
+        "episodes_per_worker":  EPISODES_PER_WORKER,
+        "kl_weight":            KL_WEIGHT,
+        "total_steps":          TOTAL_STEPS,
     }
 )
 
@@ -109,9 +108,9 @@ env = RLVFEnv(
     episodes_per_worker = EPISODES_PER_WORKER,
     kl_weight           = KL_WEIGHT,
     batch_size          = BATCH_SIZE,
-    layer_types=len(LAYER_TYPES),
-    rank=RANK,
-    num_layers=NUM_LAYERS
+    layer_types         = len(LAYER_TYPES),
+    rank                = RANK,
+    num_layers          = NUM_LAYERS,
 )
 print(f"Batch size: {env.batch_size}")
 
@@ -121,9 +120,9 @@ Path(CHECKPOINT_DIR).mkdir(parents=True, exist_ok=True)
 def save_checkpoint(step: int):
     path = f"{CHECKPOINT_DIR}/hn_step_{step:05d}.pt"
     torch.save({
-        "step":       step,
-        "model":      policy.state_dict(),
-        "optimizer":  ppo.optimizer.state_dict(),
+        "step":      step,
+        "model":     policy.state_dict(),
+        "optimizer": ppo.optimizer.state_dict(),
     }, path)
     print(f"[train] Checkpoint saved to {path}")
 
@@ -148,14 +147,13 @@ for step in range(start_step, TOTAL_STEPS):
     # 1. Sample fresh profiles for this batch
     states = env.get_observation_batch(env.batch_size).to(DEVICE)  # (B, 19)
 
-    # 2. Sample actions from policy — detach everything before handing to PPO
-    #    PPO recomputes log_probs internally via _evaluate for the gradient flow
+    # 2. Sample actions from policy
     with torch.no_grad():
         actions, log_probs, A, B = policy.get_action_and_logprob(states)
         actions   = actions.detach()
         log_probs = log_probs.detach()
 
-    # 3. Fan out to environment workers — collect rewards
+    # 3. Fan out to environment workers
     rewards = env.step_batch(
         action_batch = actions.cpu(),
         states       = states.cpu(),
@@ -163,7 +161,7 @@ for step in range(start_step, TOTAL_STEPS):
         B            = B,
     ).to(DEVICE)  # (B,)
 
-    # 4. PPO update — pass fully detached batch
+    # 4. PPO update
     batch = (
         states.detach(),
         actions.detach(),
@@ -174,25 +172,23 @@ for step in range(start_step, TOTAL_STEPS):
 
     # 5. Logging
     if step % LOG_EVERY == 0:
-        mean_reward = rewards.mean().item()
-        std_reward  = rewards.std().item()
-
-        # Dictionary to store all WandB step logs
         log_dict = {
-            "train/reward_mean": mean_reward,
-            "train/reward_std":  std_reward,
+            "train/reward_mean": rewards.mean().item(),
+            "train/reward_std":  rewards.std().item(),
             "train/reward_min":  rewards.min().item(),
             "train/reward_max":  rewards.max().item(),
+            # Action diagnostics
+            "diag/z_mean":       actions.mean().item(),
+            "diag/z_std":        actions.std().item(),
+            "diag/logp_old":     log_probs.mean().item(),
             "step": step,
         }
 
-        # Pull score and LLM KL divergence metrics directly from environment if tracked
         if hasattr(env, "last_scores") and env.last_scores is not None:
             log_dict["train/score_mean"] = float(env.last_scores.mean().item())
         if hasattr(env, "last_kls") and env.last_kls is not None:
             log_dict["train/kl_mean"] = float(env.last_kls.mean().item())
 
-        # Include PPO loss/update metrics if returned by ppo.update()
         if isinstance(ppo_info, dict):
             for k, v in ppo_info.items():
                 if isinstance(v, torch.Tensor):
@@ -203,13 +199,17 @@ for step in range(start_step, TOTAL_STEPS):
 
         print(
             f"[train] step {step:04d} | "
-            f"reward: {mean_reward:+.4f} | "
-            f"reward_std: {std_reward:.4f}"
+            f"reward: {rewards.mean().item():+.4f} | "
+            f"logp_old: {log_probs.mean().item():.4f} | "
+            f"logp_new: {ppo_info.get('logp_new_mean', 0):.4f} | "
+            f"ratio: {ppo_info.get('ratio_mean', 0):.4f} | "
+            f"grad_norm: {ppo_info.get('grad_norm', 0):.4f} | "
+            f"z_mean: {actions.mean().item():.4f}"
         )
 
     # 6. Eval
     if step % EVAL_EVERY == 0:
-        eval_states = env.eval_profiles.to(DEVICE)  # fixed (32, 19)
+        eval_states = env.eval_profiles.to(DEVICE)
         with torch.no_grad():
             eval_actions, _, eval_A, eval_B = policy.get_action_and_logprob(eval_states)
             eval_actions = eval_actions.detach()
@@ -219,13 +219,10 @@ for step in range(start_step, TOTAL_STEPS):
             B            = eval_B,
         )
 
-        # Build eval log dict
         eval_log_dict = {
             "eval/reward_mean": eval_metrics.get("eval_reward_mean", 0.0),
             "eval/reward_std":  eval_metrics.get("eval_reward_std", 0.0),
         }
-        
-        # Include optional score and KL breakdown if available in eval_metrics
         if "eval_score_mean" in eval_metrics:
             eval_log_dict["eval/score_mean"] = eval_metrics["eval_score_mean"]
         if "eval_kl_mean" in eval_metrics:
