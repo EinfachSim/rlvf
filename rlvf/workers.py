@@ -88,13 +88,19 @@ class EnvWorker:
         self.base_logits  = data["logits"]
         self.domain_texts = data["texts"]
 
+        with torch.no_grad():
+            check_logits, check_mask = self._get_adapted_logits()
+            init_kl = self._compute_kl(check_logits, check_mask)
+            print(f"[Diag] KL of freshly-loaded model vs base_logits: {init_kl:.6f}")
+            # Should be ~0. If not, base_logits and current tokenization are mismatched.
+
         with open(QUEST_PATH) as f:
             self.questionnaire_text = f.read()
 
         self._save_base_weights()
         print("[EnvWorker] Ready.")
 
-        
+
         print(f"[Diag] Model param dtype: {next(self.model.parameters()).dtype}")
         print(f"[Diag] Base logits dtype: {self.base_logits.dtype}")
 
