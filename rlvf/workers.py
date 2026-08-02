@@ -143,6 +143,7 @@ class EnvWorker:
         # Token ids for the digits 1..6 (all single-token surface forms).
         self._digit_ids = self._build_digit_token_ids()
         print(f"[EnvWorker] Digit token ids: {self._digit_ids}")
+        self._calibrate_digit_scoring()
 
         # Active adapter hook handles
         self._hooks = []
@@ -243,20 +244,85 @@ class EnvWorker:
     # ── Questionnaire (smooth expected-value scoring) ────────────────────────
 
     def _build_digit_token_ids(self) -> dict:
-        """All single-token ids whose surface form decodes to the digit k."""
+        """
+        All single-token ids whose surface form is the digit k.
+        Covers three tokenizer conventions:
+          - bare digit token      "k"        (Mistral v3 splits numbers into
+                                              single bare-digit tokens)
+          - SP word-initial form  "\u2581k"   ('▁k', older SentencePiece vocabs)
+          - byte-fallback form    "<0xXX>"   (UTF-8 byte of the digit char)
+        Keeps whichever exist in this vocab; asserts at least one per digit.
+        """
+        unk = self.tokenizer.unk_token_id
         ids = {}
         for k in range(1, 7):
+            candidates = [str(k), f"\u2581{k}", f"<0x{ord(str(k)):02X}>"]
             variants = set()
-            for text in (str(k), " " + str(k)):
-                toks = self.tokenizer.encode(text, add_special_tokens=False)
-                if len(toks) == 1:
-                    variants.add(toks[0])
-            tid = self.tokenizer.convert_tokens_to_ids(f"\u2581{k}")  # '▁k'
-            if tid is not None and tid >= 0 and tid != self.tokenizer.unk_token_id:
-                variants.add(tid)
-            assert variants, f"no single-token id found for digit {k}"
+            for tok in candidates:
+                tid = self.tokenizer.convert_tokens_to_ids(tok)
+                if tid is not None and tid >= 0 and tid != unk:
+                    variants.add(tid)
+            assert variants, (
+                f"no single-token id found for digit {k}; "
+                f"checked token forms {candidates}"
+            )
             ids[k] = sorted(variants)
         return ids
+
+    def _digit_mass_at_last_pos(self):
+        """Base-model digit probability mass at the current answer position."""
+        with torch.no_grad():
+            logits = self.model(**self._quest_inputs).logits
+        probs = F.softmax(logits[:, -1, :].float(), dim=-1)      # (57, V)
+        digit_p = torch.stack(
+            [probs[:, self._digit_ids[k]].sum(dim=-1) for k in range(1, 7)],
+            dim=-1,
+        )
+        return float(digit_p.sum(dim=-1).mean().item()), probs
+
+    def _calibrate_digit_scoring(self):
+        """
+        Verify on the BASE model that the answer position actually carries
+        digit mass. Vocabs without '\u2581k' digit merges often emit a
+        whitespace token first and the digit second; in that case, prime the
+        prompts with that whitespace token so scoring reads the digit
+        position. Everything is printed for traceability.
+        """
+        mass, probs = self._digit_mass_at_last_pos()
+        mean_p = probs.mean(dim=0)
+        topv, topi = mean_p.topk(5)
+        top_desc = ", ".join(
+            f"{tid}:{self.tokenizer.decode([tid])!r}:{v:.3f}"
+            for v, tid in zip(topv.tolist(), topi.tolist())
+        )
+        print(f"[Diag] base digit mass at answer position: {mass:.4f}")
+        print(f"[Diag] top-5 first tokens: {top_desc}")
+
+        if mass < 0.2:
+            top_id = int(topi[0].item())
+            top_str = self.tokenizer.decode([top_id])
+            if top_str.strip() == "":
+                # Model wants to emit whitespace first — prime with it and
+                # score the next position instead.
+                n = self._quest_inputs["input_ids"].shape[0]
+                pad_col = torch.full((n, 1), top_id, dtype=torch.long,
+                                     device=self.device)
+                one_col = torch.ones((n, 1), dtype=torch.long,
+                                     device=self.device)
+                self._quest_inputs["input_ids"] = torch.cat(
+                    [self._quest_inputs["input_ids"], pad_col], dim=1)
+                self._quest_inputs["attention_mask"] = torch.cat(
+                    [self._quest_inputs["attention_mask"], one_col], dim=1)
+                mass2, _ = self._digit_mass_at_last_pos()
+                print(f"[Diag] primed prompts with whitespace token {top_id} "
+                      f"({top_str!r}); digit mass now: {mass2:.4f}")
+                assert mass2 > mass, "priming did not improve digit mass"
+                mass = mass2
+            else:
+                print("[Diag] WARNING: low digit mass and first token is not "
+                      "whitespace — inspect the prompt format before trusting "
+                      "scores.")
+        self._base_digit_mass = mass
 
     def _answer_questionnaire(self):
         """
