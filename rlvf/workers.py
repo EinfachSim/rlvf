@@ -116,6 +116,19 @@ class EnvWorker:
                 else:
                     attn.v_proj.weight.data += W_delta.to(torch.float16)
 
+        total_norm = 0.0
+        for li in range(32):
+            attn = self.model.model.layers[li].self_attn
+            dq = (attn.q_proj.weight.data - self._base_weights[f"{li}_q"]).float()
+            dv = (attn.v_proj.weight.data - self._base_weights[f"{li}_v"]).float()
+            layer_norm = dq.norm().item() + dv.norm().item()
+            total_norm += layer_norm
+
+        print(f"[Diag] Total ΔW Frobenius norm across all layers: {total_norm:.4f}")
+        print(f"[Diag] Mean ΔW norm per layer: {total_norm/32:.4f}")
+        print(f"[Diag] d mean abs: {d.abs().mean().item():.6f}")
+        print(f"[Diag] b mean abs: {b.abs().mean().item():.6f}")
+
     def _restore_base_weights(self):
         for layer_idx in TARGET_LAYERS:
             attn = self.model.model.layers[layer_idx].self_attn
@@ -247,7 +260,7 @@ class EnvWorker:
             answers = self._answer_questionnaire(profile)  # list[int]
             score = self._score(answers, profile)
             t4 = time.perf_counter()
-            
+
             reward = score - kl_weight * kl
             t5 = time.perf_counter()
 
