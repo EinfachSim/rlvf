@@ -155,6 +155,7 @@ class EnvWorker:
     def _answer_questionnaire(self, profile: list[float]) -> dict:
         prompt = self._build_prompt(profile)
         result = self.generator(prompt, max_new_tokens=200, repetition_penalty=1.3)
+        print(f"[Diag] answer: {result[:50]}")
         answers = [int(x) for x in result.split(",")]
         return {f"q{i+1}": val for i, val in enumerate(answers)}
 
