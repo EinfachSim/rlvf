@@ -5,6 +5,20 @@ from abc import ABC, abstractmethod
 from rlvf.data import ValueProfileSampler
 from rlvf.workers import EnvWorker
 
+"""
+CHANGES vs previous version
+---------------------------
+1. Actions are (b, d) in the paper-faithful VeRA layout:
+       b: dict k -> (batch, L, d_out[k]);  d: (batch, L*T, rank).
+2. self.last_scores / self.last_kls / self.last_digit_mass / self.last_errors /
+   self.last_delta_fro are now actually populated after every _run_pool call —
+   train.py's `hasattr(env, "last_scores")` branch was dead code before, which
+   is why the run CSV contained no score/KL decomposition.
+3. eval_batch also returns eval_score_mean / eval_kl_mean (train.py already
+   had handling for those keys).
+4. Per-worker adapter-id debug print is now behind `verbose`.
+"""
+
 
 class BaseEnv(ABC):
     @abstractmethod
@@ -33,19 +47,28 @@ class RLVFEnv(BaseEnv):
         batch_size: int = None,
         num_layers: int = 32,
         layer_types: int = 2,
-        rank: int = 8
+        rank: int = 8,
+        verbose: bool = False,
     ):
         self.num_workers = num_workers
-        self.episodes_per_worker  = episodes_per_worker
+        self.episodes_per_worker = episodes_per_worker
         if not batch_size:
             self.batch_size = num_workers * episodes_per_worker
         else:
             self.batch_size = batch_size
         self.kl_weight = kl_weight
+        self.verbose = verbose
 
         self.num_layers = num_layers
         self.layer_types = layer_types
         self.rank = rank
+
+        # Diagnostics populated after every _run_pool call
+        self.last_scores = None
+        self.last_kls = None
+        self.last_digit_mass = None
+        self.last_delta_fro = None
+        self.last_errors = 0
 
         # ── Samplers ──────────────────────────────────────────────────────────
         # Separate RNGs so eval set is always reproducible regardless of
@@ -75,7 +98,7 @@ class RLVFEnv(BaseEnv):
 
     def step_batch(
         self,
-        action_batch: tuple[torch.Tensor],   # (2, batch_size, L*T, rank)
+        action_batch,                 # (b, d): b dict k->(B, L, d_out[k]); d (B, L*T, rank)
         states: torch.Tensor,         # (batch_size, 19)
         A: dict,                      # {"q": (L, rank, d_in), "v": ...}
         B: dict,                      # {"q": (L, d_out, rank), "v": ...}
@@ -96,7 +119,7 @@ class RLVFEnv(BaseEnv):
         Run a batch of episodes on the fixed eval profiles.
         Returns diagnostics dict — call every N steps, no PPO update.
         """
-        assert action_batch[0].shape[0] == len(self.eval_profiles), \
+        assert action_batch[1].shape[0] == len(self.eval_profiles), \
             f"eval action_batch must have {len(self.eval_profiles)} rows"
 
         rewards = self._run_pool(
@@ -107,32 +130,37 @@ class RLVFEnv(BaseEnv):
             "eval_reward_std":  rewards.std().item(),
             "eval_reward_min":  rewards.min().item(),
             "eval_reward_max":  rewards.max().item(),
+            "eval_score_mean":  float(self.last_scores.mean().item()),
+            "eval_kl_mean":     float(self.last_kls.mean().item()),
+            "eval_digit_mass":  float(self.last_digit_mass.mean().item()),
         }
 
     # ── Internals ─────────────────────────────────────────────────────────────
 
     def _run_pool(
         self,
-        action_batch: torch.Tensor,
+        action_batch,
         states: torch.Tensor,
         A: dict,
         B: dict,
         tag: str = "TRAIN",
     ) -> torch.Tensor:
-        n = action_batch[0].shape[0]
+        b_batch, d_flat = action_batch
+        n = d_flat.shape[0]
 
-        b_batch = action_batch[0].reshape(n, self.num_layers, self.layer_types, self.rank)
-        d_batch = action_batch[1].reshape(n, self.num_layers, self.layer_types, self.rank)
-
+        d_batch = d_flat.reshape(
+            n, self.num_layers, self.layer_types, self.rank
+        )
 
         A_np = {k: v.detach().cpu().numpy() for k, v in A.items()}
         B_np = {k: v.detach().cpu().numpy() for k, v in B.items()}
 
         payloads = self._build_payloads(b_batch, d_batch, states, A_np, B_np, n)
 
-        for i, p in enumerate(payloads):
-            ids = [ep["adapter_id"] for ep in p]
-            print(f"[Debug] Worker {i} gets adapter_ids: {ids}")
+        if self.verbose:
+            for i, p in enumerate(payloads):
+                ids = [ep["adapter_id"] for ep in p]
+                print(f"[Debug] Worker {i} gets adapter_ids: {ids}")
 
         results_nested = list(self.pool.map(
             lambda worker, payload: worker.run_episodes_serial.remote(payload),
@@ -145,6 +173,19 @@ class RLVFEnv(BaseEnv):
         rewards = torch.tensor(
             [r["reward"] for r in results], dtype=torch.float32
         )
+
+        # Populate diagnostics (previously train.py's hasattr checks were dead)
+        self.last_scores = torch.tensor(
+            [r["score"] for r in results], dtype=torch.float32)
+        self.last_kls = torch.tensor(
+            [r["kl"] for r in results], dtype=torch.float32)
+        self.last_digit_mass = torch.tensor(
+            [r.get("digit_mass", float("nan")) for r in results],
+            dtype=torch.float32)
+        self.last_delta_fro = torch.tensor(
+            [r.get("delta_w_frobenius", float("nan")) for r in results],
+            dtype=torch.float32)
+        self.last_errors = sum(1 for r in results if "error" in r)
 
         self._log(results, tag)
         return rewards
@@ -171,7 +212,8 @@ class RLVFEnv(BaseEnv):
                 chunk.append({
                     "adapter_id": idx,
                     "profile":    states[idx].tolist(),
-                    "b_np":       b_batch[idx].cpu().numpy(),
+                    "b_np":       {k: v[idx].cpu().numpy()
+                                   for k, v in b_batch.items()},
                     "d_np":       d_batch[idx].cpu().numpy(),
                     "A_np":       A_np,
                     "B_np":       B_np,

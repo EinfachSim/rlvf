@@ -3,6 +3,23 @@ train.py
 
 Main training loop. Runs on the SLURM head node (has GPU for HyperNetwork).
 Ray workers on the other node handle environment computation.
+
+CHANGES vs previous version
+---------------------------
+1. Paper-faithful VeRA actions (b, d): b per OUTPUT dim per layer/type,
+   d per rank. Total action dim = 32*(4096+1024) + 512 = 164,352.
+2. Eval uses deterministic=True (policy means). Previously eval sampled
+   actions, so it measured policy+exploration-noise, not the policy.
+3. train/score_mean, train/kl_mean, digit mass, ΔW norm, and error counts are
+   now logged for real (env.last_* is populated now — the old hasattr branch
+   never fired, which is why the CSV had no score/KL decomposition).
+4. log_std is logged every step (would have caught the -2 vs -4 init mismatch
+   immediately).
+5. target_kl = 0.02 and clip_ratio = 0.2 on TRUE joint ratios/KL. The old
+   values were calibrated (accidentally) to per-dim-normalized quantities.
+6. CHECKPOINT_DIR bumped to checkpoints_v3: the architecture changed again
+   (b heads per type, separate log_stds), so auto-resume from v1/v2
+   checkpoints would crash or silently mis-load.
 """
 
 from pathlib import Path
@@ -27,7 +44,7 @@ EPISODES_PER_WORKER = args.episodes_per_worker
 # ── Config ────────────────────────────────────────────────────────────────────
 DEVICE          = "cuda:0"
 LUSTRE          = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf"
-CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints"
+CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_v3"   # v3: VeRA (b,d) — incompatible with v1/v2 ckpts
 
 # HyperNetwork
 NUM_LAYERS      = 32
@@ -36,12 +53,20 @@ DIMS            = {"q": [4096, 4096], "v": [1024, 4096]}
 PROFILE_DIM     = 19
 RANK            = 8
 
-# PPO
+# PPO — calibrated for TRUE joint ratios / KL (nats).
+# TARGET_KL is a TOTAL KL over the FULL action (now 164,352 dims with VeRA
+# b in R^{d_out}). KL scales with action dim: even minute per-dim policy
+# movement produces large total KL, so expect update_iters to sit at 1-2 —
+# PPO then behaves like REINFORCE-with-baseline, which is fine and safe.
+# TARGET_KL below = ~6e-6 nats/dim, deliberately loose in total terms.
+# NOTE the early stop can only prevent ADDITIONAL epochs; the size of the
+# FIRST gradient step of each update is set by LR alone. Do not raise LR
+# without rechecking ppo/approx_kl.
 LR              = 5e-5
-CLIP_RATIO      = 0.15
+CLIP_RATIO      = 0.2
 VF_COEF         = 0.5
 ENT_COEF        = 0.0
-TARGET_KL       = 0.1
+TARGET_KL       = 1.0
 PPO_EPOCHS      = 10
 BATCH_SIZE      = 64
 
@@ -58,7 +83,7 @@ LOG_EVERY       = 1
 print("Initializing Weights & Biases...")
 wandb.init(
     project="rlvf-pvq-alignment",
-    name="mistral-7b-hypernetwork-ppo",
+    name="mistral-7b-hypernetwork-ppo-v3-vera",
     config={
         "num_layers":           NUM_LAYERS,
         "layer_types":          LAYER_TYPES,
@@ -90,7 +115,7 @@ policy = HyperNetwork(
     rank        = RANK,
 ).to(DEVICE)
 
-#Value head warm start
+# Value head warm start
 with torch.no_grad():
     policy.value_head[-1].bias.fill_(-2.0)
 
@@ -153,14 +178,15 @@ for step in range(start_step, TOTAL_STEPS):
 
     # 2. Sample actions from policy
     with torch.no_grad():
-        actions, log_probs, A, B = policy.get_action_and_logprob(states)
-        action_b, action_d = actions
-        action_b, action_d = action_b.detach(), action_d.detach()
+        (action_b, action_d), log_probs, A, B = policy.get_action_and_logprob(states)
+        action_b  = {k: v.detach() for k, v in action_b.items()}
+        action_d  = action_d.detach()
         log_probs = log_probs.detach()
 
     # 3. Fan out to environment workers
     rewards = env.step_batch(
-        action_batch = (action_b.cpu(), action_d.cpu()),
+        action_batch = ({k: v.cpu() for k, v in action_b.items()},
+                        action_d.cpu()),
         states       = states.cpu(),
         A            = A,
         B            = B,
@@ -169,32 +195,40 @@ for step in range(start_step, TOTAL_STEPS):
     # 4. PPO update
     batch = (
         states.detach(),
-        (action_b.detach(), action_d.detach()),
+        (action_b, action_d),
         rewards.detach(),
-        log_probs.detach(),
+        log_probs,
     )
     ppo_info = ppo.update(batch)
 
     # 5. Logging
     if step % LOG_EVERY == 0:
+        with torch.no_grad():
+            log_std_mean = policy.log_std_mean().item()
+            b_flat = torch.cat([v.flatten() for v in action_b.values()])
+
         log_dict = {
             "train/reward_mean": rewards.mean().item(),
             "train/reward_std":  rewards.std().item(),
             "train/reward_min":  rewards.min().item(),
             "train/reward_max":  rewards.max().item(),
+            # Reward decomposition — env.last_* is populated now
+            "train/score_mean":  float(env.last_scores.mean().item()),
+            "train/kl_mean":     float(env.last_kls.mean().item()),
+            "train/digit_mass":  float(env.last_digit_mass.mean().item()),
+            "train/delta_w_fro": float(env.last_delta_fro.nanmean().item()),
+            "train/errors":      env.last_errors,
             # Action diagnostics
-            "diag/b_mean":       action_b.mean().item(),
-            "diag/b_std":        action_b.std().item(),
             "diag/d_mean":       action_d.mean().item(),
             "diag/d_std":        action_d.std().item(),
+            "diag/d_abs_mean":   action_d.abs().mean().item(),
+            "diag/b_mean":       b_flat.mean().item(),
+            "diag/b_std":        b_flat.std().item(),
+            "diag/b_abs_mean":   b_flat.abs().mean().item(),
+            "diag/log_std":      log_std_mean,
             "diag/logp_old":     log_probs.mean().item(),
             "step": step,
         }
-
-        if hasattr(env, "last_scores") and env.last_scores is not None:
-            log_dict["train/score_mean"] = float(env.last_scores.mean().item())
-        if hasattr(env, "last_kls") and env.last_kls is not None:
-            log_dict["train/kl_mean"] = float(env.last_kls.mean().item())
 
         if isinstance(ppo_info, dict):
             for k, v in ppo_info.items():
@@ -207,23 +241,25 @@ for step in range(start_step, TOTAL_STEPS):
         print(
             f"[train] step {step:04d} | "
             f"reward: {rewards.mean().item():+.4f} | "
-            f"logp_old: {log_probs.mean().item():.4f} | "
-            f"logp_new: {ppo_info.get('logp_new_mean', 0):.4f} | "
+            f"score: {env.last_scores.mean().item():+.4f} | "
+            f"kl: {env.last_kls.mean().item():.4f} | "
+            f"approx_kl: {ppo_info.get('approx_kl', 0):.4f} | "
+            f"iters: {ppo_info.get('update_iters', 0)} | "
             f"ratio: {ppo_info.get('ratio_mean', 0):.4f} | "
             f"grad_norm: {ppo_info.get('grad_norm', 0):.4f} | "
-            f"b_mean: {action_b.mean().item():.4f}"
-            f"d_mean: {action_d.mean().item():.4f}"
+            f"log_std: {log_std_mean:.3f}"
         )
 
-    # 6. Eval
+    # 6. Eval — deterministic (policy means), so it measures the policy itself
     if step % EVAL_EVERY == 0:
         eval_states = env.eval_profiles.to(DEVICE)
         with torch.no_grad():
-            eval_actions, _, eval_A, eval_B = policy.get_action_and_logprob(eval_states)
-            eval_action_b, eval_action_d = eval_actions
-            eval_action_b, eval_action_d = eval_action_b.detach(), eval_action_d.detach()
+            (eval_b, eval_d), _, eval_A, eval_B = policy.get_action_and_logprob(
+                eval_states, deterministic=True
+            )
         eval_metrics = env.eval_batch(
-            action_batch = (eval_action_b.cpu(), eval_action_d.cpu()),
+            action_batch = ({k: v.cpu() for k, v in eval_b.items()},
+                            eval_d.cpu()),
             A            = eval_A,
             B            = eval_B,
         )
@@ -231,18 +267,18 @@ for step in range(start_step, TOTAL_STEPS):
         eval_log_dict = {
             "eval/reward_mean": eval_metrics.get("eval_reward_mean", 0.0),
             "eval/reward_std":  eval_metrics.get("eval_reward_std", 0.0),
+            "eval/score_mean":  eval_metrics.get("eval_score_mean", 0.0),
+            "eval/kl_mean":     eval_metrics.get("eval_kl_mean", 0.0),
+            "eval/digit_mass":  eval_metrics.get("eval_digit_mass", 0.0),
         }
-        if "eval_score_mean" in eval_metrics:
-            eval_log_dict["eval/score_mean"] = eval_metrics["eval_score_mean"]
-        if "eval_kl_mean" in eval_metrics:
-            eval_log_dict["eval/kl_mean"] = eval_metrics["eval_kl_mean"]
-
         wandb.log(eval_log_dict, step=step)
 
         print(
             f"[eval]  step {step:04d} | "
             f"reward: {eval_metrics['eval_reward_mean']:+.4f} ± "
-            f"{eval_metrics['eval_reward_std']:.4f}"
+            f"{eval_metrics['eval_reward_std']:.4f} | "
+            f"score: {eval_metrics['eval_score_mean']:+.4f} | "
+            f"kl: {eval_metrics['eval_kl_mean']:.4f}"
         )
 
     # 7. Checkpoint
