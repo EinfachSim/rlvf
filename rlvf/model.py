@@ -118,10 +118,10 @@ class HyperNetwork(torch.nn.Module):
         torch.nn.init.zeros_(self.d_head_mean.bias)
 
         self.log_std_d = torch.nn.Parameter(
-            torch.full((self.num_layers * self.num_types, rank), -1.0)
+            torch.full((self.num_layers * self.num_types, rank), -2.0)
         )
         self.log_std_b = torch.nn.Parameter(
-           torch.full((self.num_layers * self.num_types, rank), -1.0)
+           torch.full((self.num_layers * self.num_types, rank), -2.0)
         )
 
         # VALUE HEAD

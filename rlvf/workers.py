@@ -3,12 +3,11 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import numpy as np
-import outlines
-from outlines import Generator
-from outlines.types import regex
 import fcntl
 
-MODEL_PATH  = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/models/Mistral-7B-v0.3"
+import re
+
+MODEL_PATH  = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/models/Mistral-7B-Instruct-v0.3"
 DATA_PATH   = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/data/base_logits.pt"
 QUEST_PATH  = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/data/questionnaire.txt"
 LOCK_PATH   = "/tmp/rlvf_model_load.lock"
@@ -73,9 +72,15 @@ class EnvWorker:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        print("[EnvWorker] Initializing Outlines regex generator...")
-        outlines_model = outlines.from_transformers(self.model, self.tokenizer)
-        self.generator = Generator(outlines_model, regex(PVQ_PATTERN))
+        self.tokenizer.padding_side = "left"
+        with open(QUEST_PATH) as f:
+            raw = f.read()
+        self.quest_items = re.findall(
+            r'^\s*\d+\.\s+(.+?)(?:\s*\[.*?\])?$', raw, re.MULTILINE
+        )
+        assert len(self.quest_items) == 57, \
+            f"Expected 57 items, got {len(self.quest_items)}"
+        print(f"[EnvWorker] Parsed {len(self.quest_items)} questionnaire items.")
 
         print(f"[EnvWorker] Loading base logits from {DATA_PATH}...")
         data = torch.load(DATA_PATH, map_location=self.device)
@@ -145,22 +150,55 @@ class EnvWorker:
         kl = masked_kl.sum() / mask.float().sum()
         return float(kl.item())
 
-    def _build_prompt(self, profile: list[float]) -> str:
-        return (
-            "You are roleplaying as a person.\n"
-            "Answer the PVQ-RR questionnaire below as this person.\n\n"
-            f"{self.questionnaire_text}\n"
-        )
+    def _answer_questionnaire(self, profile: list[float]) -> list[int]:
+        prompts = [
+            f"[INST] How much does the following statement describe you?\n"
+            f"1 = Not like me at all, 6 = Very much like me.\n"
+            f"Reply with a single digit only.\n\n"
+            f"{item.strip()} [/INST]"
+            for item in self.quest_items
+        ]
 
-    def _answer_questionnaire(self, profile: list[float]) -> dict:
-        prompt = self._build_prompt(profile)
-        result = self.generator(prompt, max_new_tokens=200, repetition_penalty=1.3)
-        print(f"[Diag] answer: {result[:50]}")
-        answers = [int(x) for x in result.split(",")]
-        return {f"q{i+1}": val for i, val in enumerate(answers)}
+        inputs = self.tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=256,
+        ).to(self.device)
 
-    def _score(self, answers: dict, profile: list[float]) -> float:
-        answered = np.array([answers[f"q{i}"] for i in range(1, 58)], dtype=float)
+        with torch.no_grad():
+            output = self.model.generate(
+                **inputs,
+                max_new_tokens=5,
+                do_sample=False,
+            )
+
+        answers = []
+        failures = 0
+        for seq in output:
+            new_tokens = seq[inputs.input_ids.shape[1]:]
+            decoded = self.tokenizer.decode(
+                new_tokens, skip_special_tokens=True
+            ).strip()
+            digits = re.findall(r'[1-6]', decoded)
+            if digits:
+                answers.append(int(digits[0]))
+            else:
+                failures += 1
+                answers.append(None)
+
+        if failures > 10:
+            raise ValueError(
+                f"Too many parse failures ({failures}/57) — adapter broke model"
+            )
+
+        # Replace any None with neutral fallback
+        answers = [a if a is not None else 4 for a in answers]
+        return answers
+
+    def _score(self, answers: list[int], profile: list[float]) -> float:
+        answered = np.array(answers, dtype=float)
         dim_means = np.array([
             answered[np.array(items) - 1].mean()
             for items in SCORING_KEY.values()
@@ -206,10 +244,10 @@ class EnvWorker:
             kl = self._compute_kl(adapted_logits, attention_mask)
             t3 = time.perf_counter()
 
-            answers = self._answer_questionnaire(profile)
-            t4 = time.perf_counter()
-
+            answers = self._answer_questionnaire(profile)  # list[int]
             score = self._score(answers, profile)
+            t4 = time.perf_counter()
+            
             reward = score - kl_weight * kl
             t5 = time.perf_counter()
 
