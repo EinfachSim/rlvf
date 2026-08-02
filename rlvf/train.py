@@ -41,12 +41,12 @@ LR              = 5e-5
 CLIP_RATIO      = 0.15
 VF_COEF         = 0.5
 ENT_COEF        = 0.0
-TARGET_KL       = 0.05
+TARGET_KL       = 0.1
 PPO_EPOCHS      = 10
 BATCH_SIZE      = 64
 
 # Env
-KL_WEIGHT       = 0.0
+KL_WEIGHT       = 0.1
 
 # Training
 TOTAL_STEPS     = 1000
