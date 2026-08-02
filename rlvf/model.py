@@ -286,5 +286,12 @@ class HyperNetwork(torch.nn.Module):
 
         return (b, d), log_prob, self.A, self.B
 
+    def act(self, x):
+        """Deterministic actions (b, d) for the gradient-based trainers.
+        Differentiable when called with grad enabled — used for the VJP
+        surrogate on the head node."""
+        d_mean, b_mean = self.forward(x)
+        return b_mean, d_mean
+
     def get_value(self, x):
         return self.value_head(x)

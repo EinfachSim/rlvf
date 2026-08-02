@@ -135,6 +135,74 @@ class RLVFEnv(BaseEnv):
             "eval_digit_mass":  float(self.last_digit_mass.mean().item()),
         }
 
+    def step_batch_grad(
+        self,
+        action_batch,                 # (b, d) as in step_batch
+        states: torch.Tensor,
+        A: dict,
+        B: dict,
+        mode: str = "pathwise",
+        grad_kwargs: dict = None,     # tok_kl_weight, ent_coef, temperature...
+    ) -> dict:
+        """
+        Fan out gradient episodes. Workers return dL/db, dL/dd per episode
+        (L = per-episode LOSS, to be minimized). Failed episodes carry zero
+        grads and ok=False; the trainer divides by n_ok.
+        Returns dict with rewards, stacked grads, and diagnostics.
+        """
+        b_batch, d_flat = action_batch
+        n = d_flat.shape[0]
+        d_batch = d_flat.reshape(
+            n, self.num_layers, self.layer_types, self.rank)
+
+        A_np = {k: v.detach().cpu().numpy() for k, v in A.items()}
+        B_np = {k: v.detach().cpu().numpy() for k, v in B.items()}
+
+        gk = dict(grad_kwargs or {})
+        payloads = self._build_payloads(b_batch, d_batch, states, A_np, B_np, n)
+        for chunk in payloads:
+            for ep in chunk:
+                ep["mode"] = mode
+                ep.update(gk)
+
+        results_nested = list(self.pool.map(
+            lambda worker, payload: worker.run_episodes_grad_serial.remote(payload),
+            payloads,
+        ))
+        results = [r for chunk in results_nested for r in chunk]
+        results.sort(key=lambda r: r["adapter_id"])
+
+        ok = torch.tensor([r["ok"] for r in results], dtype=torch.bool)
+        rewards = torch.tensor([r["reward"] for r in results],
+                               dtype=torch.float32)
+        grad_d = torch.stack([
+            torch.from_numpy(r["grad_d"]).reshape(-1, self.rank)
+            for r in results
+        ])                                              # (n, L*T, rank)
+        grad_b = {}
+        for k in results[0]["grad_b"]:
+            grad_b[k] = torch.stack([
+                torch.from_numpy(r["grad_b"][k]) for r in results
+            ])                                          # (n, L, d_out)
+
+        self.last_scores = torch.tensor([r["score"] for r in results],
+                                        dtype=torch.float32)
+        self.last_kls = torch.tensor([r["kl"] for r in results],
+                                     dtype=torch.float32)
+        self.last_digit_mass = torch.tensor(
+            [r.get("digit_mass", float("nan")) for r in results],
+            dtype=torch.float32)
+        self.last_errors = int((~ok).sum().item())
+
+        self._log(results, f"GRAD:{mode}")
+        return {
+            "rewards": rewards, "ok": ok,
+            "grad_b": grad_b, "grad_d": grad_d,
+            "env_grad_norms": torch.tensor(
+                [r["grad_norm"] for r in results], dtype=torch.float32),
+            "results": results,
+        }
+
     # ── Internals ─────────────────────────────────────────────────────────────
 
     def _run_pool(
