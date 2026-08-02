@@ -63,7 +63,8 @@ class EnvWorker:
             print(f"[EnvWorker] Loading model from {MODEL_PATH}...")
             self.model = AutoModelForCausalLM.from_pretrained(
                 MODEL_PATH,
-                torch_dtype=torch.float16,
+                dtype=torch.float16,
+                local_files_only=True,
             ).to(self.device)
             self.model.eval()
             print(f"[EnvWorker] Model loaded, releasing lock.")
