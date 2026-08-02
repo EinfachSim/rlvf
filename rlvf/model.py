@@ -111,17 +111,17 @@ class HyperNetwork(torch.nn.Module):
 
         self.b_head_mean = torch.nn.Linear(head_in_dim, rank)
         self.d_head_mean = torch.nn.Linear(head_in_dim, rank)
-        torch.nn.init.orthogonal_(self.b_head_mean.weight, gain=0.01)
+        torch.nn.init.orthogonal_(self.b_head_mean.weight, gain=0.001)
         torch.nn.init.zeros_(self.b_head_mean.bias)
 
-        torch.nn.init.orthogonal_(self.d_head_mean.weight, gain=0.01)
+        torch.nn.init.orthogonal_(self.d_head_mean.weight, gain=0.001)
         torch.nn.init.zeros_(self.d_head_mean.bias)
 
         self.log_std_d = torch.nn.Parameter(
-            torch.full((self.num_layers * self.num_types, rank), -2.0)
+            torch.full((self.num_layers * self.num_types, rank), -4.0)
         )
         self.log_std_b = torch.nn.Parameter(
-           torch.full((self.num_layers * self.num_types, rank), -2.0)
+           torch.full((self.num_layers * self.num_types, rank), -4.0)
         )
 
         # VALUE HEAD
