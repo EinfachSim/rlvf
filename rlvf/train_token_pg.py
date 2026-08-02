@@ -59,8 +59,8 @@ ENT_COEF        = 0.0
 TEMPERATURE     = 1.0
 
 TOTAL_STEPS     = 1000
-EVAL_EVERY      = 10
-SAVE_EVERY      = 10
+EVAL_EVERY      = 5
+SAVE_EVERY      = 5
 
 # ── Init ──────────────────────────────────────────────────────────────────────
 print("Initializing Weights & Biases...")
@@ -126,95 +126,102 @@ GRAD_KWARGS = {
 
 print(f"\nStarting token-PG training from step {start_step}...")
 
-for step in range(start_step, TOTAL_STEPS):
+_last_step = start_step
+try:
+    for step in range(start_step, TOTAL_STEPS):
+        _last_step = step
 
-    states = env.get_observation_batch(env.batch_size).to(DEVICE)
+        states = env.get_observation_batch(env.batch_size).to(DEVICE)
 
-    with torch.no_grad():
-        b_ship, d_ship = policy.act(states)
-    A, B = policy.A, policy.B
-
-    res = env.step_batch_grad(
-        action_batch=({k: v.cpu() for k, v in b_ship.items()}, d_ship.cpu()),
-        states=states.cpu(), A=A, B=B, mode="token_pg",
-        grad_kwargs=GRAD_KWARGS,
-    )
-    ok = res["ok"]
-    n_ok = int(ok.sum().item())
-    if n_ok == 0:
-        print(f"[train] step {step:04d} | ALL episodes failed — skipping update")
-        continue
-    g_d = res["grad_d"].to(DEVICE)
-    g_b = {k: v.to(DEVICE) for k, v in res["grad_b"].items()}
-
-    b2, d2 = policy.act(states)
-    surrogate = (d2 * g_d.detach()).sum()
-    for k in g_b:
-        surrogate = surrogate + (b2[k] * g_b[k].detach()).sum()
-    surrogate = surrogate / n_ok
-
-    optimizer.zero_grad()
-    surrogate.backward()
-    grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), GRAD_CLIP)
-    optimizer.step()
-
-    rewards = res["rewards"]
-    kl_tok = [r.get("kl_token", float("nan")) for r in res["results"]]
-    ent    = [r.get("entropy", float("nan")) for r in res["results"]]
-    adv_sd = [r.get("adv_std", float("nan")) for r in res["results"]]
-    kl_tok_mean = float(torch.tensor(kl_tok)[ok].nanmean().item())
-    ent_mean    = float(torch.tensor(ent)[ok].nanmean().item())
-    adv_sd_mean = float(torch.tensor(adv_sd)[ok].nanmean().item())
-
-    log_dict = {
-        "train/reward_mean": rewards[ok].mean().item(),
-        "train/reward_std":  rewards[ok].std().item(),
-        "train/score_mean":  float(env.last_scores[ok].mean().item()),
-        "train/kl_mean":     float(env.last_kls[ok].mean().item()),
-        "train/kl_token_mean": kl_tok_mean,
-        "train/entropy_mean":  ent_mean,
-        "train/adv_std_mean":  adv_sd_mean,
-        "train/digit_mass":  float(env.last_digit_mass[ok].mean().item()),
-        "train/errors":      env.last_errors,
-        "train/env_grad_norm_mean": res["env_grad_norms"][ok].mean().item(),
-        "train/hn_grad_norm": grad_norm.item(),
-        "step": step,
-    }
-    wandb.log(log_dict, step=step)
-    print(
-        f"[train] step {step:04d} | "
-        f"reward: {log_dict['train/reward_mean']:+.4f} | "
-        f"score(disc): {log_dict['train/score_mean']:+.4f} | "
-        f"kl_tok: {kl_tok_mean:.4f} | H: {ent_mean:.3f} | "
-        f"adv_sd: {adv_sd_mean:.3f} | hn_g: {grad_norm.item():.4f} | "
-        f"err: {env.last_errors}"
-    )
-
-    if step % EVAL_EVERY == 0:
-        eval_states = env.eval_profiles.to(DEVICE)
         with torch.no_grad():
-            eval_b, eval_d = policy.act(eval_states)
-        eval_metrics = env.eval_batch(
-            action_batch=({k: v.cpu() for k, v in eval_b.items()},
-                          eval_d.cpu()),
-            A=A, B=B,
+            b_ship, d_ship = policy.act(states)
+        A, B = policy.A, policy.B
+
+        res = env.step_batch_grad(
+            action_batch=({k: v.cpu() for k, v in b_ship.items()}, d_ship.cpu()),
+            states=states.cpu(), A=A, B=B, mode="token_pg",
+            grad_kwargs=GRAD_KWARGS,
         )
-        wandb.log({
-            "eval/reward_mean": eval_metrics["eval_reward_mean"],
-            "eval/reward_std":  eval_metrics["eval_reward_std"],
-            "eval/score_mean":  eval_metrics["eval_score_mean"],
-            "eval/kl_mean":     eval_metrics["eval_kl_mean"],
-            "eval/digit_mass":  eval_metrics["eval_digit_mass"],
-        }, step=step)
-        print(f"[eval]  step {step:04d} | "
-              f"reward: {eval_metrics['eval_reward_mean']:+.4f} ± "
-              f"{eval_metrics['eval_reward_std']:.4f} | "
-              f"score: {eval_metrics['eval_score_mean']:+.4f}")
+        ok = res["ok"]
+        n_ok = int(ok.sum().item())
+        if n_ok == 0:
+            print(f"[train] step {step:04d} | ALL episodes failed — skipping update")
+            continue
+        g_d = res["grad_d"].to(DEVICE)
+        g_b = {k: v.to(DEVICE) for k, v in res["grad_b"].items()}
 
-    if step % SAVE_EVERY == 0 and step > 0:
-        save_checkpoint(step)
+        b2, d2 = policy.act(states)
+        surrogate = (d2 * g_d.detach()).sum()
+        for k in g_b:
+            surrogate = surrogate + (b2[k] * g_b[k].detach()).sum()
+        surrogate = surrogate / n_ok
 
-save_checkpoint(TOTAL_STEPS)
+        optimizer.zero_grad()
+        surrogate.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), GRAD_CLIP)
+        optimizer.step()
+
+        rewards = res["rewards"]
+        kl_tok = [r.get("kl_token", float("nan")) for r in res["results"]]
+        ent    = [r.get("entropy", float("nan")) for r in res["results"]]
+        adv_sd = [r.get("adv_std", float("nan")) for r in res["results"]]
+        kl_tok_mean = float(torch.tensor(kl_tok)[ok].nanmean().item())
+        ent_mean    = float(torch.tensor(ent)[ok].nanmean().item())
+        adv_sd_mean = float(torch.tensor(adv_sd)[ok].nanmean().item())
+
+        log_dict = {
+            "train/reward_mean": rewards[ok].mean().item(),
+            "train/reward_std":  rewards[ok].std().item(),
+            "train/score_mean":  float(env.last_scores[ok].mean().item()),
+            "train/kl_mean":     float(env.last_kls[ok].mean().item()),
+            "train/kl_token_mean": kl_tok_mean,
+            "train/entropy_mean":  ent_mean,
+            "train/adv_std_mean":  adv_sd_mean,
+            "train/digit_mass":  float(env.last_digit_mass[ok].mean().item()),
+            "train/errors":      env.last_errors,
+            "train/env_grad_norm_mean": res["env_grad_norms"][ok].mean().item(),
+            "train/hn_grad_norm": grad_norm.item(),
+            "step": step,
+        }
+        wandb.log(log_dict, step=step)
+        print(
+            f"[train] step {step:04d} | "
+            f"reward: {log_dict['train/reward_mean']:+.4f} | "
+            f"score(disc): {log_dict['train/score_mean']:+.4f} | "
+            f"kl_tok: {kl_tok_mean:.4f} | H: {ent_mean:.3f} | "
+            f"adv_sd: {adv_sd_mean:.3f} | hn_g: {grad_norm.item():.4f} | "
+            f"err: {env.last_errors}"
+        )
+
+        if step % EVAL_EVERY == 0:
+            eval_states = env.eval_profiles.to(DEVICE)
+            with torch.no_grad():
+                eval_b, eval_d = policy.act(eval_states)
+            eval_metrics = env.eval_batch(
+                action_batch=({k: v.cpu() for k, v in eval_b.items()},
+                              eval_d.cpu()),
+                A=A, B=B,
+            )
+            wandb.log({
+                "eval/reward_mean": eval_metrics["eval_reward_mean"],
+                "eval/reward_std":  eval_metrics["eval_reward_std"],
+                "eval/score_mean":  eval_metrics["eval_score_mean"],
+                "eval/kl_mean":     eval_metrics["eval_kl_mean"],
+                "eval/digit_mass":  eval_metrics["eval_digit_mass"],
+            }, step=step)
+            print(f"[eval]  step {step:04d} | "
+                  f"reward: {eval_metrics['eval_reward_mean']:+.4f} ± "
+                  f"{eval_metrics['eval_reward_std']:.4f} | "
+                  f"score: {eval_metrics['eval_score_mean']:+.4f}")
+
+        if step % SAVE_EVERY == 0 and step > 0:
+            save_checkpoint(step)
+
+finally:
+    # Always flush a checkpoint on exit — including SIGTERM /
+    # scancel — so preempted jobs resume instead of restarting.
+    save_checkpoint(_last_step)
+
 print("Training complete.")
 wandb.finish()
 ray.shutdown()

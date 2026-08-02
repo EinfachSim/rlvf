@@ -44,8 +44,8 @@ BATCH_SIZE      = 64
 KL_WEIGHT       = 0.1
 
 TOTAL_STEPS     = 1000
-EVAL_EVERY      = 10
-SAVE_EVERY      = 10
+EVAL_EVERY      = 5
+SAVE_EVERY      = 5
 
 # ── Init ──────────────────────────────────────────────────────────────────────
 print("Initializing Weights & Biases...")
@@ -102,93 +102,100 @@ if ckpts:
 
 print(f"\nStarting pathwise training from step {start_step}...")
 
-for step in range(start_step, TOTAL_STEPS):
+_last_step = start_step
+try:
+    for step in range(start_step, TOTAL_STEPS):
+        _last_step = step
 
-    # 1. Fresh profiles
-    states = env.get_observation_batch(env.batch_size).to(DEVICE)   # (B, 19)
+        # 1. Fresh profiles
+        states = env.get_observation_batch(env.batch_size).to(DEVICE)   # (B, 19)
 
-    # 2. Deterministic actions to ship (no grad needed for the rollout copy)
-    with torch.no_grad():
-        b_ship, d_ship = policy.act(states)
-    A, B = policy.A, policy.B
-
-    # 3. Workers compute rewards AND dL/d(b, d)
-    res = env.step_batch_grad(
-        action_batch=({k: v.cpu() for k, v in b_ship.items()}, d_ship.cpu()),
-        states=states.cpu(), A=A, B=B, mode="pathwise",
-    )
-    ok = res["ok"]
-    n_ok = int(ok.sum().item())
-    if n_ok == 0:
-        print(f"[train] step {step:04d} | ALL episodes failed — skipping update")
-        continue
-    g_d = res["grad_d"].to(DEVICE)                    # (B, L*T, r)
-    g_b = {k: v.to(DEVICE) for k, v in res["grad_b"].items()}
-
-    # 4. VJP surrogate — autograd sums per-episode VJPs into policy grads.
-    #    Failed episodes contribute zero grads by construction; divide by n_ok.
-    b2, d2 = policy.act(states)                       # WITH grad
-    surrogate = (d2 * g_d.detach()).sum()
-    for k in g_b:
-        surrogate = surrogate + (b2[k] * g_b[k].detach()).sum()
-    surrogate = surrogate / n_ok
-
-    optimizer.zero_grad()
-    surrogate.backward()
-    grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), GRAD_CLIP)
-    optimizer.step()
-
-    # 5. Logging
-    rewards = res["rewards"]
-    log_dict = {
-        "train/reward_mean": rewards[ok].mean().item(),
-        "train/reward_std":  rewards[ok].std().item(),
-        "train/score_mean":  float(env.last_scores[ok].mean().item()),
-        "train/kl_mean":     float(env.last_kls[ok].mean().item()),
-        "train/digit_mass":  float(env.last_digit_mass[ok].mean().item()),
-        "train/errors":      env.last_errors,
-        "train/env_grad_norm_mean": res["env_grad_norms"][ok].mean().item(),
-        "train/hn_grad_norm": grad_norm.item(),
-        "step": step,
-    }
-    wandb.log(log_dict, step=step)
-    print(
-        f"[train] step {step:04d} | "
-        f"reward: {log_dict['train/reward_mean']:+.4f} | "
-        f"score: {log_dict['train/score_mean']:+.4f} | "
-        f"kl: {log_dict['train/kl_mean']:.4f} | "
-        f"env_g: {log_dict['train/env_grad_norm_mean']:.4f} | "
-        f"hn_g: {log_dict['train/hn_grad_norm']:.4f} | "
-        f"err: {env.last_errors}"
-    )
-
-    # 6. Eval — deterministic reward-only episodes on the fixed eval profiles
-    if step % EVAL_EVERY == 0:
-        eval_states = env.eval_profiles.to(DEVICE)
+        # 2. Deterministic actions to ship (no grad needed for the rollout copy)
         with torch.no_grad():
-            eval_b, eval_d = policy.act(eval_states)
-        eval_metrics = env.eval_batch(
-            action_batch=({k: v.cpu() for k, v in eval_b.items()},
-                          eval_d.cpu()),
-            A=A, B=B,
+            b_ship, d_ship = policy.act(states)
+        A, B = policy.A, policy.B
+
+        # 3. Workers compute rewards AND dL/d(b, d)
+        res = env.step_batch_grad(
+            action_batch=({k: v.cpu() for k, v in b_ship.items()}, d_ship.cpu()),
+            states=states.cpu(), A=A, B=B, mode="pathwise",
         )
-        wandb.log({
-            "eval/reward_mean": eval_metrics["eval_reward_mean"],
-            "eval/reward_std":  eval_metrics["eval_reward_std"],
-            "eval/score_mean":  eval_metrics["eval_score_mean"],
-            "eval/kl_mean":     eval_metrics["eval_kl_mean"],
-            "eval/digit_mass":  eval_metrics["eval_digit_mass"],
-        }, step=step)
-        print(f"[eval]  step {step:04d} | "
-              f"reward: {eval_metrics['eval_reward_mean']:+.4f} ± "
-              f"{eval_metrics['eval_reward_std']:.4f} | "
-              f"score: {eval_metrics['eval_score_mean']:+.4f} | "
-              f"kl: {eval_metrics['eval_kl_mean']:.4f}")
+        ok = res["ok"]
+        n_ok = int(ok.sum().item())
+        if n_ok == 0:
+            print(f"[train] step {step:04d} | ALL episodes failed — skipping update")
+            continue
+        g_d = res["grad_d"].to(DEVICE)                    # (B, L*T, r)
+        g_b = {k: v.to(DEVICE) for k, v in res["grad_b"].items()}
 
-    if step % SAVE_EVERY == 0 and step > 0:
-        save_checkpoint(step)
+        # 4. VJP surrogate — autograd sums per-episode VJPs into policy grads.
+        #    Failed episodes contribute zero grads by construction; divide by n_ok.
+        b2, d2 = policy.act(states)                       # WITH grad
+        surrogate = (d2 * g_d.detach()).sum()
+        for k in g_b:
+            surrogate = surrogate + (b2[k] * g_b[k].detach()).sum()
+        surrogate = surrogate / n_ok
 
-save_checkpoint(TOTAL_STEPS)
+        optimizer.zero_grad()
+        surrogate.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), GRAD_CLIP)
+        optimizer.step()
+
+        # 5. Logging
+        rewards = res["rewards"]
+        log_dict = {
+            "train/reward_mean": rewards[ok].mean().item(),
+            "train/reward_std":  rewards[ok].std().item(),
+            "train/score_mean":  float(env.last_scores[ok].mean().item()),
+            "train/kl_mean":     float(env.last_kls[ok].mean().item()),
+            "train/digit_mass":  float(env.last_digit_mass[ok].mean().item()),
+            "train/errors":      env.last_errors,
+            "train/env_grad_norm_mean": res["env_grad_norms"][ok].mean().item(),
+            "train/hn_grad_norm": grad_norm.item(),
+            "step": step,
+        }
+        wandb.log(log_dict, step=step)
+        print(
+            f"[train] step {step:04d} | "
+            f"reward: {log_dict['train/reward_mean']:+.4f} | "
+            f"score: {log_dict['train/score_mean']:+.4f} | "
+            f"kl: {log_dict['train/kl_mean']:.4f} | "
+            f"env_g: {log_dict['train/env_grad_norm_mean']:.4f} | "
+            f"hn_g: {log_dict['train/hn_grad_norm']:.4f} | "
+            f"err: {env.last_errors}"
+        )
+
+        # 6. Eval — deterministic reward-only episodes on the fixed eval profiles
+        if step % EVAL_EVERY == 0:
+            eval_states = env.eval_profiles.to(DEVICE)
+            with torch.no_grad():
+                eval_b, eval_d = policy.act(eval_states)
+            eval_metrics = env.eval_batch(
+                action_batch=({k: v.cpu() for k, v in eval_b.items()},
+                              eval_d.cpu()),
+                A=A, B=B,
+            )
+            wandb.log({
+                "eval/reward_mean": eval_metrics["eval_reward_mean"],
+                "eval/reward_std":  eval_metrics["eval_reward_std"],
+                "eval/score_mean":  eval_metrics["eval_score_mean"],
+                "eval/kl_mean":     eval_metrics["eval_kl_mean"],
+                "eval/digit_mass":  eval_metrics["eval_digit_mass"],
+            }, step=step)
+            print(f"[eval]  step {step:04d} | "
+                  f"reward: {eval_metrics['eval_reward_mean']:+.4f} ± "
+                  f"{eval_metrics['eval_reward_std']:.4f} | "
+                  f"score: {eval_metrics['eval_score_mean']:+.4f} | "
+                  f"kl: {eval_metrics['eval_kl_mean']:.4f}")
+
+        if step % SAVE_EVERY == 0 and step > 0:
+            save_checkpoint(step)
+
+finally:
+    # Always flush a checkpoint on exit — including SIGTERM /
+    # scancel — so preempted jobs resume instead of restarting.
+    save_checkpoint(_last_step)
+
 print("Training complete.")
 wandb.finish()
 ray.shutdown()
