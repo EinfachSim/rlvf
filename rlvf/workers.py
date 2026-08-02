@@ -92,6 +92,10 @@ class EnvWorker:
 
         self._save_base_weights()
         print("[EnvWorker] Ready.")
+        # Verify base logits consistency at init time
+        test_logits, test_mask = self._get_adapted_logits()
+        test_kl = self._compute_kl(test_logits, test_mask)
+        print(f"[Diag] KL at init (should be ~0): {test_kl:.6f}")
 
     def _save_base_weights(self):
         self._base_weights = {}
