@@ -242,6 +242,13 @@ class EnvWorker:
         try:
             t0 = time.perf_counter()
             self._apply_vera(b,d, A, B)
+            # Temporarily restore and compute base KL
+            self._restore_base_weights()
+            base_check_logits, base_check_mask = self._get_adapted_logits()
+            base_kl = self._compute_kl(base_check_logits, base_check_mask)
+            print(f"[Diag] KL of unmodified model: {base_kl:.6f}")
+            # Re-apply adapter
+            self._apply_vera(b, d, A, B)
             t1 = time.perf_counter()
 
             attn = self.model.model.layers[27].self_attn
