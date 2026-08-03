@@ -42,6 +42,9 @@ LR              = 1e-4          # supervised-style; exact gradients
 GRAD_CLIP       = 1.0
 BATCH_SIZE      = 64
 KL_WEIGHT       = 0.1
+MASS_COEF       = 0.1   # weight of -log(digit_mass): keeps "answers with a
+                        # digit" in the objective; the score itself is
+                        # renormalized and therefore blind to mass
 
 TOTAL_STEPS     = 1000
 EVAL_EVERY      = 5
@@ -119,6 +122,7 @@ try:
         res = env.step_batch_grad(
             action_batch=({k: v.cpu() for k, v in b_ship.items()}, d_ship.cpu()),
             states=states.cpu(), A=A, B=B, mode="pathwise",
+            grad_kwargs={"mass_coef": MASS_COEF},
         )
         ok = res["ok"]
         n_ok = int(ok.sum().item())
@@ -143,10 +147,19 @@ try:
 
         # 5. Logging
         rewards = res["rewards"]
+        mass_pens = torch.tensor([r.get("mass_penalty", float("nan"))
+                                  for r in res["results"]])
         log_dict = {
-            "train/reward_mean": rewards[ok].mean().item(),
-            "train/reward_std":  rewards[ok].std().item(),
-            "train/score_mean":  float(env.last_scores[ok].mean().item()),
+            # UNFILTERED means (failures counted at FAILURE_SCORE) — directly
+            # comparable to eval. The *_ok variants exclude failures; the first
+            # 8h run logged only ok-means, which masked the failure population
+            # and made train/eval look like they diverged.
+            "train/reward_mean": rewards.mean().item(),
+            "train/reward_std":  rewards.std().item(),
+            "train/reward_mean_ok": rewards[ok].mean().item(),
+            "train/score_mean_ok":  float(env.last_scores[ok].mean().item()),
+            "train/mass_penalty": float(mass_pens[ok].nanmean().item()),
+            "train/score_mean":  float(env.last_scores.mean().item()),
             "train/kl_mean":     float(env.last_kls[ok].mean().item()),
             "train/digit_mass":  float(env.last_digit_mass[ok].mean().item()),
             "train/errors":      env.last_errors,
@@ -157,7 +170,8 @@ try:
         wandb.log(log_dict, step=step)
         print(
             f"[train] step {step:04d} | "
-            f"reward: {log_dict['train/reward_mean']:+.4f} | "
+            f"reward: {log_dict['train/reward_mean']:+.4f} "
+            f"(ok: {log_dict['train/reward_mean_ok']:+.4f}) | "
             f"score: {log_dict['train/score_mean']:+.4f} | "
             f"kl: {log_dict['train/kl_mean']:.4f} | "
             f"env_g: {log_dict['train/env_grad_norm_mean']:.4f} | "

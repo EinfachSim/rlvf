@@ -118,10 +118,12 @@ if ckpts:
     start_step = ckpt["step"]
     print(f"[train] Resumed from {ckpts[-1]} (step {start_step})")
 
+MASS_COEF = 0.1
 GRAD_KWARGS = {
     "tok_kl_weight": TOK_KL_WEIGHT,
     "ent_coef": ENT_COEF,
     "temperature": TEMPERATURE,
+    "mass_coef": MASS_COEF,
 }
 
 print(f"\nStarting token-PG training from step {start_step}...")

@@ -483,6 +483,7 @@ class EnvWorker:
                          tok_kl_weight: float = 0.05,
                          ent_coef: float = 0.0,
                          temperature: float = 1.0,
+                         mass_coef: float = 0.1,
                          seed: int = None) -> dict:
         """
         Returns loss gradients wrt (b, d) — i.e. the head node MINIMIZES the
@@ -515,12 +516,22 @@ class EnvWorker:
                 (-score_t).backward()
                 g_ans = ans_leaf.grad.detach()               # (57,)
                 score = float(score_t.item())
-                # PASS 2: chunked re-forward WITH grad; exact chain rule
+                # PASS 2: chunked re-forward WITH grad; exact chain rule.
+                # The score renormalizes by digit mass, making it INVARIANT to
+                # mass — an unpenalized direction the optimizer exploited in
+                # the first 8h run (mass 1.00 -> 0.63, episodes collapsing).
+                # The -mass_coef*log(mass) term makes answering-with-a-digit
+                # part of the objective: ~0 at mass≈1, steep as mass drops.
+                mass_pen_total = 0.0
                 for lo in range(0, n_items, QUEST_CHUNK):
                     rows = slice(lo, min(lo + QUEST_CHUNK, n_items))
-                    a_chunk, _, _ = self._digits_from_logits(
+                    a_chunk, m_chunk, _ = self._digits_from_logits(
                         self._quest_logits_chunk(rows))
-                    (a_chunk * g_ans[rows]).sum().backward()
+                    mass_pen = -torch.log(m_chunk.clamp_min(1e-6)).sum() / n_items
+                    ((a_chunk * g_ans[rows]).sum()
+                     + mass_coef * mass_pen).backward()
+                    mass_pen_total += float(mass_pen.item())
+                info["mass_penalty"] = mass_pen_total
                 kl = self._domain_kl_with_grad(kl_weight) if kl_weight > 0 \
                     else self._compute_kl(*self._get_adapted_logits())
                 reward = score - kl_weight * kl
@@ -566,10 +577,18 @@ class EnvWorker:
                     kl_i = (log_q_full.exp() *
                             (log_q_full - self._base_ans_logp[rows])
                             ).sum(dim=-1)                            # (n,)
+                    m_chunk = p_chunk.new_zeros(1)  # placeholder; recompute mass
+                    probs_full = F.softmax(logits, dim=-1)
+                    mass_chunk = torch.stack(
+                        [probs_full[:, ids].sum(-1)
+                         for ids in self._digit_id_lists], -1).sum(-1)
+                    mass_pen = -torch.log(
+                        mass_chunk.clamp_min(1e-6)).sum() / n_items
                     loss_chunk = (
                         -(logpi * adv[rows]).sum()
                         - ent_coef * H.sum()
                         + tok_kl_weight * kl_i.sum() / n_items
+                        + mass_coef * mass_pen
                     )
                     loss_chunk.backward()
                     kl_tok_total += float(kl_i.sum().item())
