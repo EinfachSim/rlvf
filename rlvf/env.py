@@ -297,6 +297,7 @@ class RLVFEnv(BaseEnv):
     def _log(self, results: list[dict], tag: str):
         rewards = [r["reward"] for r in results]
         scores  = [r["score"]  for r in results]
+        scores_disc = [r["score_disc"] for r in results]
         kls     = [r["kl"]     for r in results]
         errors  = [r for r in results if "error" in r]
         n       = len(results)
@@ -304,6 +305,7 @@ class RLVFEnv(BaseEnv):
             f"[RLVFEnv:{tag}] "
             f"reward: {sum(rewards)/n:+.4f} | "
             f"score: {sum(scores)/n:+.4f} | "
+            f"score_disc: {sum(scores_disc)/n:+.4f} | "
             f"kl: {sum(kls)/n:.4f} | "
             f"errors: {len(errors)}/{n}"
         )
