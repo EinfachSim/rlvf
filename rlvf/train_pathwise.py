@@ -30,7 +30,7 @@ EPISODES_PER_WORKER = args.episodes_per_worker
 # ── Config ────────────────────────────────────────────────────────────────────
 DEVICE          = "cuda:0"
 LUSTRE          = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf"
-CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_pathwise_v1"
+CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_pathwise_v2"
 
 NUM_LAYERS      = 32
 LAYER_TYPES     = ["q", "v"]
