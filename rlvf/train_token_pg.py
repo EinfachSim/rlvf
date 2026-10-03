@@ -208,6 +208,7 @@ try:
                 "eval/reward_mean": eval_metrics["eval_reward_mean"],
                 "eval/reward_std":  eval_metrics["eval_reward_std"],
                 "eval/score_mean":  eval_metrics["eval_score_mean"],
+                "eval/score_disc_mean": eval_metrics["eval_score_disc_mean"],
                 "eval/kl_mean":     eval_metrics["eval_kl_mean"],
                 "eval/digit_mass":  eval_metrics["eval_digit_mass"],
             }, step=step)
