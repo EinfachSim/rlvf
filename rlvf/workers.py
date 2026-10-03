@@ -525,8 +525,7 @@ class EnvWorker:
                 mass_pen_total = 0.0
                 for lo in range(0, n_items, QUEST_CHUNK):
                     rows = slice(lo, min(lo + QUEST_CHUNK, n_items))
-                    a_chunk, m_chunk, _ = self._digits_from_logits(
-                        self._quest_logits_chunk(rows))
+                    a_chunk, m_chunk, _ = self._digits_from_logits(self._quest_logits_chunk(rows))
                     mass_pen = -torch.log(m_chunk.clamp_min(1e-6)).sum() / n_items
                     ((a_chunk * g_ans[rows]).sum()
                      + mass_coef * mass_pen).backward()

@@ -131,6 +131,7 @@ class RLVFEnv(BaseEnv):
             "eval_reward_min":  rewards.min().item(),
             "eval_reward_max":  rewards.max().item(),
             "eval_score_mean":  float(self.last_scores.mean().item()),
+            "eval_score_disc_mean": float(self.last_scores_disc.mean().item()),
             "eval_kl_mean":     float(self.last_kls.mean().item()),
             "eval_digit_mass":  float(self.last_digit_mass.mean().item()),
         }
@@ -178,7 +179,7 @@ class RLVFEnv(BaseEnv):
         grad_d = torch.stack([
             torch.from_numpy(r["grad_d"]).reshape(-1, self.rank)
             for r in results
-        ])                                              # (n, L*T, rank)
+        ]) # (n, L*T, rank)
         grad_b = {}
         for k in results[0]["grad_b"]:
             grad_b[k] = torch.stack([
@@ -245,6 +246,8 @@ class RLVFEnv(BaseEnv):
         # Populate diagnostics (previously train.py's hasattr checks were dead)
         self.last_scores = torch.tensor(
             [r["score"] for r in results], dtype=torch.float32)
+        self.last_scores_disc = torch.tensor(
+            [r["score_disc"] for r in results], dtype=torch.float32)
         self.last_kls = torch.tensor(
             [r["kl"] for r in results], dtype=torch.float32)
         self.last_digit_mass = torch.tensor(

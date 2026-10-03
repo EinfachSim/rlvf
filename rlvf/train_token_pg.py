@@ -10,7 +10,7 @@ Per episode, the worker: samples the 57 answers from the renormalized 6-way
 digit distributions of the ADAPTED model; computes the TRUE DISCRETE score;
 computes exact leave-one-out counterfactual advantages per item (closed-form
 baseline — no critic); backprops
-    L = Σ_i [ -logπ_i(a_i)·adv_i − ent_coef·H_i ]
+    L = Σ_i [ -logπ_i(a_i)·adv_i - ent_coef·H_i 
         + tok_kl_weight · mean_i KL_i(adapted‖base @ answer pos)
         + kl_weight · KL_domain
 through the frozen LLM to (b, d) and ships the gradients back. The head node

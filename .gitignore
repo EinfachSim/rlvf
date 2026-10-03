@@ -4,3 +4,4 @@ env/
 *.egg-info/
 *.zip
 .DS_STORE
+design_notes.md
