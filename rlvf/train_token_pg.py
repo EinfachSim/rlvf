@@ -54,7 +54,7 @@ LR              = 3e-5          # PG is noisier than pathwise — smaller lr
 GRAD_CLIP       = 1.0
 BATCH_SIZE      = 64
 KL_WEIGHT       = 0.1           # domain-text KL weight
-TOK_KL_WEIGHT   = 0.05          # per-answer-position KL weight
+TOK_KL_WEIGHT   = 0.00          # per-answer-position KL weight
 ENT_COEF        = 0.0
 TEMPERATURE     = 1.0
 
