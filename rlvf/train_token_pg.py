@@ -113,6 +113,7 @@ def save_checkpoint(step: int):
 
 start_step = 0
 ckpts = sorted(Path(CHECKPOINT_DIR).glob("hn_step_*.pt"))
+print(ckpts)
 if ckpts:
     ckpt = torch.load(str(ckpts[-1]), map_location=DEVICE)
     policy.load_state_dict(ckpt["model"])
