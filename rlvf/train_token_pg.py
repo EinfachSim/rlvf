@@ -34,6 +34,8 @@ parser.add_argument("--num_workers", type=int, default=2)
 parser.add_argument("--episodes_per_worker", type=int, default=16)
 parser.add_argument("--init_from", type=str, default="",
                     help="path to a pathwise checkpoint to warm-start from")
+parser.add_argument("--checkpoint_dir", type=str, default="",
+                    help="path to a token_pg checkpoint to resume training from")
 args = parser.parse_args()
 
 NUM_WORKERS         = args.num_workers
@@ -42,7 +44,7 @@ EPISODES_PER_WORKER = args.episodes_per_worker
 # ── Config ────────────────────────────────────────────────────────────────────
 DEVICE          = "cuda:0"
 LUSTRE          = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf"
-CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_tokenpg_v1_double"
+CHECKPOINT_DIR  = f"{LUSTRE}/{args.checkpoint_dir}"
 
 NUM_LAYERS      = 32
 LAYER_TYPES     = ["q", "v"]
