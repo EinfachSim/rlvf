@@ -21,12 +21,12 @@ subclassed:
         are loaded once per process and never pickled through Ray.
 """
 
-WORKERDICT = {   # worker_type -> adapter_mode
-    "baseline":     "prompted",
-    "random":       "vera",
-    "hn_pathwise":  "vera",
-    "hn_warmstart": "vera",
-    "hn_coldstart":  "vera",
+WORKERDICT = {   # condition -> adapter_mode
+    "prompted":  "prompted",
+    "random":    "vera",
+    "warmstart": "vera",
+    "coldstart": "vera",
+    "pathwise":  "vera",
 }
 
 LOCK_PATH  = "/tmp/rlvf_model_load.lock"
@@ -72,6 +72,7 @@ class BaseWorker:
         self.adapter_mode = adapter_mode
         self.device = "cuda:0"
         self._hooks = []
+        self.A = self.B = None       # frozen VeRA matrices, set via set_frozen
 
         print("[EnvWorker] Waiting for model load lock...")
         with open(LOCK_PATH, "w") as lock_file:
@@ -125,18 +126,24 @@ class BaseWorker:
 
     # ── Benchmark episode ─────────────────────────────────────────────────────
 
-    def run_episode(self, adapter_id, profile, b_np, d_np, A_np, B_np, task) -> dict:
+    def set_frozen(self, A_np: dict, B_np: dict):
+        """Frozen VeRA A/B for this condition; sent once, kept on the GPU."""
+        self.A = {k: torch.tensor(v, device=self.device, dtype=torch.float32)
+                  for k, v in A_np.items()}
+        self.B = {k: torch.tensor(v, device=self.device, dtype=torch.float32)
+                  for k, v in B_np.items()}
+
+    def run_episode(self, adapter_id, profile, b_np, d_np, task) -> dict:
         envelope = {"adapter_id": adapter_id, "worker_mode": self.adapter_mode}
         system_prompt = None
         try:
             t0 = time.perf_counter()
             if self.adapter_mode == "vera":
+                assert self.A is not None, "set_frozen() was not called"
                 b = {k: torch.tensor(v, device=self.device, dtype=torch.float32)
                      for k, v in b_np.items()}
                 d = torch.tensor(d_np, device=self.device, dtype=torch.float32)
-                A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
-                B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
-                self._apply_vera(b, d, A, B)
+                self._apply_vera(b, d, self.A, self.B)
                 envelope.update(
                     d_abs_mean=float(d.abs().mean().item()),
                     b_abs_mean=float(torch.cat(
