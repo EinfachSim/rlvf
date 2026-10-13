@@ -42,10 +42,15 @@ def build_chat_ids(tokenizer, user: str, system_prompt: str | None,
         # Mistral-7B-Instruct's chat template has no system role;
         # prepend the profile text to the user turn instead.
         user = system_prompt + "\n\n" + user
-    ids = tokenizer.apply_chat_template(
+    # Render to text, then tokenize: robust across transformers versions
+    # (v5's apply_chat_template returns a BatchEncoding, v4 a list of ids).
+    # The template already contains <s>, so no extra special tokens.
+    text = tokenizer.apply_chat_template(
         [{"role": "user", "content": user}],
         add_generation_prompt=True,
+        tokenize=False,
     )
+    ids = tokenizer(text, add_special_tokens=False).input_ids
     if len(ids) > max_prompt_tokens:        # drop the middle, keep head + tail
         keep = max_prompt_tokens
         ids = ids[: keep // 2] + ids[-(keep - keep // 2):]
