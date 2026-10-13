@@ -560,7 +560,7 @@ class EnvWorker:
                     adv = score - baselines                           # (57,)
                 info["adv_std"] = float(adv.std().item())
 
-                # PASS 2: chunked; policy-gradient + entropy + per-answer KL
+                # second pass chunked, policy-gradient + entropy + per-answer KL
                 kl_tok_total = 0.0
                 ent_total = 0.0
                 for lo in range(0, n_items, QUEST_CHUNK):
