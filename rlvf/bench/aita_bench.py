@@ -131,9 +131,13 @@ def make_random_condition(n: int, seed: int, b_scale: float, d_scale: float):
     L, T, r, d_in, d_out = dims["L"], dims["T"], dims["rank"], dims["d_in"], dims["d_out"]
     g = torch.Generator().manual_seed(seed)
 
-    def kaiming_uniform(shape):             # fan_in = last dim
-        bound = (6.0 / shape[-1]) ** 0.5
-        return (torch.rand(shape, generator=g) * 2 - 1) * bound
+    def kaiming_uniform(shape):
+        # Exactly the HyperNetwork's init: torch's kaiming_uniform_ on the 3D
+        # tensor (fan_in = size(1) * size(2)), so random A/B have the same
+        # scale as the HN's frozen A/B.
+        t = torch.empty(shape)
+        torch.nn.init.kaiming_uniform_(t, generator=g)
+        return t
 
     A = {t: kaiming_uniform((L, r, d_in)) for t in LAYER_TYPES}
     B = {t: kaiming_uniform((L, d_out[t], r)) for t in LAYER_TYPES}
