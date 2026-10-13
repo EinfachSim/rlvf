@@ -1,233 +1,221 @@
 """
-train_token_pg.py
+AITA behavioural evaluation across all conditions.
 
-Token-level policy gradient — "tokens as actions", RLHF-shaped, one epoch per
-batch (ratio ≡ 1, so no clipping machinery is needed; adding true multi-epoch
-PPO would require one extra worker round trip per epoch to recompute per-token
-log-probs — see design_notes_rlvf.md §3).
+Conditions (each runs on its own GPU worker, all on the SAME profiles & posts):
+  prompted   base model, profile rendered into the prompt (no adapter)
+  random     random VeRA A/B and random b, d per profile
+  warmstart  HN from --ckpt_warmstart
+  coldstart  HN from --ckpt_coldstart
+  pathwise   HN from --ckpt_pathwise
 
-Per episode, the worker: samples the 57 answers from the renormalized 6-way
-digit distributions of the ADAPTED model; computes the TRUE DISCRETE score;
-computes exact leave-one-out counterfactual advantages per item (closed-form
-baseline — no critic); backprops
-    L = Σ_i [ -logπ_i(a_i)·adv_i - ent_coef·H_i 
-        + tok_kl_weight · mean_i KL_i(adapted‖base @ answer pos)
-        + kl_weight · KL_domain
-through the frozen LLM to (b, d) and ships the gradients back. The head node
-applies the identical VJP surrogate as the pathwise trainer.
+Usage:
+  python aita_eval.py --dataset /path/aita_dataset_10_values_reduced.json \
+      --ckpt_warmstart ... --ckpt_coldstart ... --ckpt_pathwise ... \
+      [--conditions prompted random pathwise] [--eval_size 64] \
+      [--posts_per_eval 200] [--out results/aita]
 
-Recommended use: initialize from a pathwise checkpoint (SFT-analog), then run
-this on the discrete metric (RL stage).
+Smoke run (plumbing only):
+  python aita_eval.py --dataset ... --conditions prompted random \
+      --eval_size 4 --posts_per_eval 20
 """
-
+import argparse
+import json
+import pickle
+import time
 from pathlib import Path
+
 import ray
 import torch
-import wandb
 
-from rlvf.env import RLVFEnv
-from rlvf.model import HyperNetwork
-import argparse
+from env import AITAEnv
+from workers import MODEL_PATH, TARGET_LAYERS, LAYER_TYPES, RANK
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--num_workers", type=int, default=2)
-parser.add_argument("--episodes_per_worker", type=int, default=16)
-parser.add_argument("--init_from", type=str, default="",
-                    help="path to a pathwise checkpoint to warm-start from")
-parser.add_argument("--checkpoint_dir", type=str, default="",
-                    help="path to a token_pg checkpoint to resume training from")
-args = parser.parse_args()
+HN_CONDITIONS = ("warmstart", "coldstart", "pathwise")
+ALL_CONDITIONS = ("prompted", "random") + HN_CONDITIONS
 
-NUM_WORKERS         = args.num_workers
-EPISODES_PER_WORKER = args.episodes_per_worker
 
-# ── Config ────────────────────────────────────────────────────────────────────
-DEVICE          = "cuda:0"
-LUSTRE          = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf"
-CHECKPOINT_DIR  = f"{LUSTRE}/{args.checkpoint_dir}"
+# ── Hypernetwork loading ──────────────────────────────────────────────────────
 
-NUM_LAYERS      = 32
-LAYER_TYPES     = ["q", "v"]
-DIMS            = {"q": [4096, 4096], "v": [1024, 4096]}
-PROFILE_DIM     = 19
-RANK            = 8
+# Where your HyperNetwork class lives (override with --hn_module).
+HN_MODULE = "rlvf.hypernetwork"
 
-LR              = 3e-5          # PG is noisier than pathwise — smaller lr
-GRAD_CLIP       = 1.0
-BATCH_SIZE      = 64
-KL_WEIGHT       = 0.1           # domain-text KL weight
-TOK_KL_WEIGHT   = 0.00          # per-answer-position KL weight
-ENT_COEF        = 0.0
-TEMPERATURE     = 1.0
+# Keys under which a state_dict may be nested inside a checkpoint dict.
+_STATE_KEYS = ("model_state_dict", "state_dict", "hn_state_dict", "model", "hn")
 
-TOTAL_STEPS     = 1000
-EVAL_EVERY      = 5
-SAVE_EVERY      = 5
 
-# ── Init ──────────────────────────────────────────────────────────────────────
-print("Initializing Weights & Biases...")
-wandb.init(
-    project="rlvf-pvq-alignment",
-    name="mistral-7b-hypernetwork-tokenpg-v1",
-    config={
-        "num_layers": NUM_LAYERS, "layer_types": LAYER_TYPES, "rank": RANK,
-        "lr": LR, "grad_clip": GRAD_CLIP, "batch_size": BATCH_SIZE,
-        "kl_weight": KL_WEIGHT, "tok_kl_weight": TOK_KL_WEIGHT,
-        "ent_coef": ENT_COEF, "temperature": TEMPERATURE,
-        "total_steps": TOTAL_STEPS, "trainer": "token_pg",
-    },
-)
+def _extract_state_dict(obj):
+    if isinstance(obj, torch.nn.Module):
+        return obj.state_dict()
+    if isinstance(obj, dict):
+        if "A.q" in obj or any(k.startswith("A.") for k in obj):
+            return obj                                    # bare state_dict
+        for k in _STATE_KEYS:
+            if k in obj:
+                return _extract_state_dict(obj[k])
+    raise ValueError(
+        "could not find a HyperNetwork state_dict in the checkpoint; "
+        f"top-level keys: {list(obj.keys()) if isinstance(obj, dict) else type(obj)}")
 
-ray.init(address="auto")
-print(f"Ray cluster resources: {ray.cluster_resources()}")
 
-print("Initialising HyperNetwork...")
-policy = HyperNetwork(
-    num_layers=NUM_LAYERS, layer_types=LAYER_TYPES, dims=DIMS,
-    profile_dim=PROFILE_DIM, rank=RANK,
-).to(DEVICE)
-policy.train()
+def _infer_hn_config(sd: dict) -> dict:
+    """Recover HyperNetwork constructor args from tensor shapes."""
+    layer_types = [k[len("A."):] for k in sd if k.startswith("A.")]
+    L, rank, _ = sd[f"A.{layer_types[0]}"].shape
+    emb_l = sd["layer_emb.weight"].shape[1]
+    emb_t = sd["type_emb.weight"].shape[1]
+    context_dim = sd["mixer.layers.1.weight"].shape[1]
+    return dict(
+        num_layers=L,
+        layer_types=layer_types,
+        dims={k: [sd[f"B.{k}"].shape[1], sd[f"A.{k}"].shape[2]] for k in layer_types},
+        emb_l_dim=emb_l,
+        emb_t_dim=emb_t,
+        profile_dim=context_dim - emb_l - emb_t,
+        rank=rank,
+        head_in_dim=sd["mlp3.layers.4.weight"].shape[0],
+    )
 
-optimizer = torch.optim.Adam(policy.parameters(), lr=LR)
 
-if args.init_from:
-    ckpt = torch.load(args.init_from, map_location=DEVICE)
-    policy.load_state_dict(ckpt["model"])
-    print(f"[train] Warm-started from {args.init_from} (step {ckpt['step']})")
+def load_hypernetwork(ckpt_path: str, device: str, hn_module: str = HN_MODULE):
+    """
+    Returns (act, A, B):
+      act(profiles (N, 19)) -> (b_batch, d_flat), deterministic (HN means)
+          b_batch: {"q": (N, L, d_out_q), "v": (N, L, d_out_v)}
+          d_flat:  (N, L*T, rank)
+      A, B: the frozen VeRA matrices stored in the HN (its A/B parameters).
+    """
+    import importlib
+    HyperNetwork = importlib.import_module(hn_module).HyperNetwork
 
-print("Spawning environment workers...")
-env = RLVFEnv(
-    num_workers=NUM_WORKERS, episodes_per_worker=EPISODES_PER_WORKER,
-    kl_weight=KL_WEIGHT, batch_size=BATCH_SIZE,
-    layer_types=len(LAYER_TYPES), rank=RANK, num_layers=NUM_LAYERS,
-)
-print(f"Batch size: {env.batch_size}")
+    sd = _extract_state_dict(torch.load(ckpt_path, map_location=device,
+                                        weights_only=False))
+    cfg = _infer_hn_config(sd)
+    hn = HyperNetwork(**cfg).to(device)
+    hn.load_state_dict(sd)                     # strict: catches config mismatch
+    hn.eval()
+    print(f"[HN] {ckpt_path}: L={cfg['num_layers']} types={cfg['layer_types']} "
+          f"dims={cfg['dims']} rank={cfg['rank']} head_in={cfg['head_in_dim']}")
 
-Path(CHECKPOINT_DIR).mkdir(parents=True, exist_ok=True)
+    @torch.no_grad()
+    def act(profiles):
+        b, d = hn.act(profiles.to(device))
+        return b, d
 
-def save_checkpoint(step: int):
-    path = f"{CHECKPOINT_DIR}/hn_step_{step:05d}.pt"
-    torch.save({"step": step, "model": policy.state_dict(),
-                "optimizer": optimizer.state_dict()}, path)
-    print(f"[train] Checkpoint saved to {path}")
+    A = {k: v.detach() for k, v in hn.A.items()}
+    B = {k: v.detach() for k, v in hn.B.items()}
+    return act, A, B
 
-start_step = 0
-ckpts = sorted(Path(CHECKPOINT_DIR).glob("hn_step_*.pt"))
-print(ckpts)
-if ckpts:
-    ckpt = torch.load(str(ckpts[-1]), map_location=DEVICE)
-    policy.load_state_dict(ckpt["model"])
-    optimizer.load_state_dict(ckpt["optimizer"])
-    start_step = ckpt["step"]
-    print(f"[train] Resumed from {ckpts[-1]} (step {start_step})")
 
-MASS_COEF = 0.1
-GRAD_KWARGS = {
-    "tok_kl_weight": TOK_KL_WEIGHT,
-    "ent_coef": ENT_COEF,
-    "temperature": TEMPERATURE,
-    "mass_coef": MASS_COEF,
-}
+# ── Random condition ──────────────────────────────────────────────────────────
 
-print(f"\nStarting token-PG training from step {start_step}...")
+def model_dims():
+    from transformers import AutoConfig
+    cfg = AutoConfig.from_pretrained(MODEL_PATH, local_files_only=True)
+    head_dim = getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
+    return {
+        "L": len(TARGET_LAYERS), "T": len(LAYER_TYPES), "rank": RANK,
+        "d_in": cfg.hidden_size,
+        "d_out": {"q": cfg.num_attention_heads * head_dim,
+                  "v": cfg.num_key_value_heads * head_dim},
+    }
 
-_last_step = start_step
-try:
-    for step in range(start_step, TOTAL_STEPS):
-        _last_step = step
 
-        states = env.get_observation_batch(env.batch_size).to(DEVICE)
+def make_random_condition(n: int, seed: int, b_scale: float, d_scale: float,
+                          d_mean: float = 0.0):
+    """
+    Random VeRA: A, B Kaiming-uniform (same init as the HN), b ~ N(0, b_scale²),
+    d ~ N(d_mean, d_scale²), independently per profile. Choose the scales so the
+    random adapters perturb the model about as much as the HN adapters do
+    (compare b_abs_mean / d_abs_mean in the printed diagnostics).
+    """
+    dims = model_dims()
+    L, T, r, d_in, d_out = dims["L"], dims["T"], dims["rank"], dims["d_in"], dims["d_out"]
+    g = torch.Generator().manual_seed(seed)
 
-        with torch.no_grad():
-            b_ship, d_ship = policy.act(states)
-        A, B = policy.A, policy.B
+    def kaiming_uniform(shape):
+        # Exactly the HyperNetwork's init: torch's kaiming_uniform_ on the 3D
+        # tensor (fan_in = size(1) * size(2)), so random A/B have the same
+        # scale as the HN's frozen A/B.
+        t = torch.empty(shape)
+        torch.nn.init.kaiming_uniform_(t, generator=g)
+        return t
 
-        res = env.step_batch_grad(
-            action_batch=({k: v.cpu() for k, v in b_ship.items()}, d_ship.cpu()),
-            states=states.cpu(), A=A, B=B, mode="token_pg",
-            grad_kwargs=GRAD_KWARGS,
-        )
-        ok = res["ok"]
-        n_ok = int(ok.sum().item())
-        if n_ok == 0:
-            print(f"[train] step {step:04d} | ALL episodes failed — skipping update")
-            continue
-        g_d = res["grad_d"].to(DEVICE)
-        g_b = {k: v.to(DEVICE) for k, v in res["grad_b"].items()}
+    A = {t: kaiming_uniform((L, r, d_in)) for t in LAYER_TYPES}
+    B = {t: kaiming_uniform((L, d_out[t], r)) for t in LAYER_TYPES}
+    b = {t: torch.randn((n, L, d_out[t]), generator=g) * b_scale for t in LAYER_TYPES}
+    d = d_mean + torch.randn((n, L * T, r), generator=g) * d_scale
+    return (b, d), (A, B)
 
-        b2, d2 = policy.act(states)
-        surrogate = (d2 * g_d.detach()).sum()
-        for k in g_b:
-            surrogate = surrogate + (b2[k] * g_b[k].detach()).sum()
-        surrogate = surrogate / n_ok
 
-        optimizer.zero_grad()
-        surrogate.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), GRAD_CLIP)
-        optimizer.step()
+# ── Main ──────────────────────────────────────────────────────────────────────
 
-        rewards = res["rewards"]
-        kl_tok = [r.get("kl_token", float("nan")) for r in res["results"]]
-        ent    = [r.get("entropy", float("nan")) for r in res["results"]]
-        adv_sd = [r.get("adv_std", float("nan")) for r in res["results"]]
-        kl_tok_mean = float(torch.tensor(kl_tok)[ok].nanmean().item())
-        ent_mean    = float(torch.tensor(ent)[ok].nanmean().item())
-        adv_sd_mean = float(torch.tensor(adv_sd)[ok].nanmean().item())
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dataset", required=True)
+    ap.add_argument("--conditions", nargs="+", default=list(ALL_CONDITIONS),
+                    choices=ALL_CONDITIONS)
+    ap.add_argument("--ckpt_warmstart")
+    ap.add_argument("--ckpt_coldstart")
+    ap.add_argument("--ckpt_pathwise")
+    ap.add_argument("--eval_size", type=int, default=64)
+    ap.add_argument("--posts_per_eval", type=int, default=200)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--random_b_scale", type=float, default=1.0)
+    ap.add_argument("--random_d_scale", type=float, default=0.1)
+    ap.add_argument("--random_d_mean", type=float, default=0.0)
+    ap.add_argument("--hn_module", default=HN_MODULE,
+                    help="python module containing the HyperNetwork class")
+    ap.add_argument("--out", default="results/aita")
+    args = ap.parse_args()
 
-        log_dict = {
-            "train/reward_mean": rewards[ok].mean().item(),
-            "train/reward_std":  rewards[ok].std().item(),
-            "train/score_mean":  float(env.last_scores[ok].mean().item()),
-            "train/kl_mean":     float(env.last_kls[ok].mean().item()),
-            "train/kl_token_mean": kl_tok_mean,
-            "train/entropy_mean":  ent_mean,
-            "train/adv_std_mean":  adv_sd_mean,
-            "train/digit_mass":  float(env.last_digit_mass[ok].mean().item()),
-            "train/errors":      env.last_errors,
-            "train/env_grad_norm_mean": res["env_grad_norms"][ok].mean().item(),
-            "train/hn_grad_norm": grad_norm.item(),
-            "step": step,
-        }
-        wandb.log(log_dict, step=step)
-        print(
-            f"[train] step {step:04d} | "
-            f"reward: {log_dict['train/reward_mean']:+.4f} | "
-            f"score(disc): {log_dict['train/score_mean']:+.4f} | "
-            f"kl_tok: {kl_tok_mean:.4f} | H: {ent_mean:.3f} | "
-            f"adv_sd: {adv_sd_mean:.3f} | hn_g: {grad_norm.item():.4f} | "
-            f"err: {env.last_errors}"
-        )
+    for c in args.conditions:
+        if c in HN_CONDITIONS and getattr(args, f"ckpt_{c}") is None:
+            ap.error(f"condition '{c}' needs --ckpt_{c}")
 
-        if step % EVAL_EVERY == 0:
-            eval_states = env.eval_profiles.to(DEVICE)
-            with torch.no_grad():
-                eval_b, eval_d = policy.act(eval_states)
-            eval_metrics = env.eval_batch(
-                action_batch=({k: v.cpu() for k, v in eval_b.items()},
-                              eval_d.cpu()),
-                A=A, B=B,
-            )
-            wandb.log({
-                "eval/reward_mean": eval_metrics["eval_reward_mean"],
-                "eval/reward_std":  eval_metrics["eval_reward_std"],
-                "eval/score_mean":  eval_metrics["eval_score_mean"],
-                "eval/score_disc_mean": eval_metrics["eval_score_disc_mean"],
-                "eval/kl_mean":     eval_metrics["eval_kl_mean"],
-                "eval/digit_mass":  eval_metrics["eval_digit_mass"],
-            }, step=step)
-            print(f"[eval]  step {step:04d} | "
-                  f"reward: {eval_metrics['eval_reward_mean']:+.4f} ± "
-                  f"{eval_metrics['eval_reward_std']:.4f} | "
-                  f"score: {eval_metrics['eval_score_mean']:+.4f}")
+    ray.init()
+    env = AITAEnv(
+        dataset_path=args.dataset,
+        posts_per_eval=args.posts_per_eval,
+        worker_types=args.conditions,
+        eval_size=args.eval_size,
+        rng_seed=args.seed,
+    )
+    profiles = env.get_observation_batch()            # (N, 19), fixed by seed
 
-        if step % SAVE_EVERY == 0 and step > 0:
-            save_checkpoint(step)
+    # Build each condition's adapters on the driver (HNs are small).
+    actions, frozen = {}, {}
+    for c in args.conditions:
+        if c == "prompted":
+            actions[c] = None
+        elif c == "random":
+            actions[c], frozen[c] = make_random_condition(
+                len(profiles), args.seed, args.random_b_scale, args.random_d_scale,
+                args.random_d_mean)
+        else:
+            act, A, B = load_hypernetwork(getattr(args, f"ckpt_{c}"), "cpu",
+                                          args.hn_module)
+            actions[c] = act(profiles)
+            frozen[c] = (A, B)
+        if actions[c] is not None:
+            b, d = actions[c]
+            print(f"[{c}] |b|={float(torch.cat([v.flatten() for v in b.values()]).abs().mean()):.4f} "
+                  f"|d|={float(d.abs().mean()):.4f}")
 
-finally:
-    # Always flush a checkpoint on exit — including SIGTERM /
-    # scancel — so preempted jobs resume instead of restarting.
-    save_checkpoint(_last_step)
+    t0 = time.perf_counter()
+    eval_out = env.step_batch(actions, frozen)
+    print(f"Benchmark done in {(time.perf_counter() - t0) / 60:.1f} min")
 
-print("Training complete.")
-wandb.finish()
-ray.shutdown()
+    # Save: summary (json) + everything needed to recompute metrics (pickle).
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    with open(out / f"summary_{stamp}.json", "w") as f:
+        json.dump({"args": vars(args), **eval_out}, f, indent=2)
+    with open(out / f"raw_{stamp}.pkl", "wb") as f:
+        pickle.dump({"args": vars(args), "profiles": profiles.numpy(),
+                     "post_ids": env.post_ids, "results": env.last_results}, f)
+    print(f"Saved to {out}/summary_{stamp}.json and raw_{stamp}.pkl")
+
+
+if __name__ == "__main__":
+    main()
