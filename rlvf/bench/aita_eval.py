@@ -120,10 +120,11 @@ def model_dims():
     }
 
 
-def make_random_condition(n: int, seed: int, b_scale: float, d_scale: float):
+def make_random_condition(n: int, seed: int, b_scale: float, d_scale: float,
+                          d_mean: float = 0.0):
     """
-    Random VeRA: A, B Kaiming-uniform (as in VeRA), b ~ N(0, b_scale²),
-    d ~ N(0, d_scale²), independently per profile. Choose the scales so the
+    Random VeRA: A, B Kaiming-uniform (same init as the HN), b ~ N(0, b_scale²),
+    d ~ N(d_mean, d_scale²), independently per profile. Choose the scales so the
     random adapters perturb the model about as much as the HN adapters do
     (compare b_abs_mean / d_abs_mean in the printed diagnostics).
     """
@@ -142,7 +143,7 @@ def make_random_condition(n: int, seed: int, b_scale: float, d_scale: float):
     A = {t: kaiming_uniform((L, r, d_in)) for t in LAYER_TYPES}
     B = {t: kaiming_uniform((L, d_out[t], r)) for t in LAYER_TYPES}
     b = {t: torch.randn((n, L, d_out[t]), generator=g) * b_scale for t in LAYER_TYPES}
-    d = torch.randn((n, L * T, r), generator=g) * d_scale
+    d = d_mean + torch.randn((n, L * T, r), generator=g) * d_scale
     return (b, d), (A, B)
 
 
@@ -161,6 +162,7 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--random_b_scale", type=float, default=1.0)
     ap.add_argument("--random_d_scale", type=float, default=0.1)
+    ap.add_argument("--random_d_mean", type=float, default=0.0)
     ap.add_argument("--hn_module", default=HN_MODULE,
                     help="python module containing the HyperNetwork class")
     ap.add_argument("--out", default="results/aita")
@@ -187,7 +189,8 @@ def main():
             actions[c] = None
         elif c == "random":
             actions[c], frozen[c] = make_random_condition(
-                len(profiles), args.seed, args.random_b_scale, args.random_d_scale)
+                len(profiles), args.seed, args.random_b_scale, args.random_d_scale,
+                args.random_d_mean)
         else:
             act, A, B = load_hypernetwork(getattr(args, f"ckpt_{c}"), "cpu",
                                           args.hn_module)
