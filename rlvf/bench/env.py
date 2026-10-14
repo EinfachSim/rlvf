@@ -9,6 +9,7 @@ import ray
 
 from workers import BaseWorker, WORKERDICT
 import aita_metrics
+import pvq_metrics
 from rlvf.data import ValueProfileSampler
 
 
@@ -190,6 +191,44 @@ class AITAEnv(BaseEnv):
             print(f"[{tag}] {wt}: {len(ok)}/{len(rs)} episodes ok, "
                   f"{sum(r['metrics']['n_posts'] for r in ok)} verdicts, "
                   f"{t:.1f}s total")
+            for r in rs:
+                if not r["ok"]:
+                    print(f"[{tag}]   {wt}#{r['adapter_id']} failed: {r.get('error')}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PVQ-RR
+# ──────────────────────────────────────────────────────────────────────────────
+
+class PVQEnv(BaseEnv):
+    """
+    Does the conditioned model answer the PVQ-RR questionnaire according to
+    its profile? Scored exactly as in training; see pvq_metrics.py.
+    """
+
+    def __init__(self, quest_path: str = None, **base_kwargs):
+        runner_kwargs = {} if quest_path is None else {"quest_path": quest_path}
+        super().__init__(benchmark="pvq", runner_kwargs=runner_kwargs, **base_kwargs)
+        self.post_ids = []          # no posts; kept so saving/merging is uniform
+
+    def _build_task(self, episode_idx: int) -> dict:
+        return {}                   # every episode answers all 57 items
+
+    def evaluate_benchmark(self, results: list[dict]) -> dict:
+        summary = pvq_metrics.pvq_table(results)
+        pvq_metrics.print_pvq_table(summary)
+        return {"benchmark": "pvq", "per_condition": summary,
+                "errors": self.last_errors}
+
+    def _log(self, results: list[dict], tag: str):
+        by_wt = defaultdict(list)
+        for r in results:
+            by_wt[r["worker_type"]].append(r)
+        for wt, rs in by_wt.items():
+            ok = [r for r in rs if r["ok"]]
+            dm = (sum(r["metrics"]["digit_mass"] for r in ok) / len(ok)) if ok else float("nan")
+            print(f"[{tag}] {wt}: {len(ok)}/{len(rs)} episodes ok, "
+                  f"digit mass {dm:.3f}")
             for r in rs:
                 if not r["ok"]:
                     print(f"[{tag}]   {wt}#{r['adapter_id']} failed: {r.get('error')}")
