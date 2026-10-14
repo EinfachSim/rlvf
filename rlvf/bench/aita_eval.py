@@ -1,7 +1,9 @@
 """
-AITA behavioural evaluation across all conditions.
+Evaluation across all conditions, on AITA (behaviour) or PVQ-RR (the
+questionnaire the HNs were trained on).
 
-Conditions (each runs on its own GPU worker, all on the SAME profiles & posts):
+Conditions (each runs on its own GPU worker, all on the SAME profiles/tasks):
+  base       plain base model, no conditioning (reference)
   prompted   base model, profile rendered into the prompt (no adapter)
   random     random VeRA A/B and random b, d per profile
   warmstart  HN from --ckpt_warmstart
@@ -9,14 +11,14 @@ Conditions (each runs on its own GPU worker, all on the SAME profiles & posts):
   pathwise   HN from --ckpt_pathwise
 
 Usage:
-  python aita_eval.py --dataset /path/aita_dataset_10_values_reduced.json \
-      --ckpt_warmstart ... --ckpt_coldstart ... --ckpt_pathwise ... \
-      [--conditions prompted random pathwise] [--eval_size 64] \
-      [--posts_per_side 10] [--out results/aita]
+  python aita_eval.py --benchmark aita --dataset /path/aita.json \
+      --ckpt_warmstart ... --ckpt_coldstart ... --ckpt_pathwise ... --seed 1234
+  python aita_eval.py --benchmark pvq \
+      --ckpt_warmstart ... --ckpt_coldstart ... --ckpt_pathwise ... --seed 1234
 
+  --seed 1234: eval profiles the HNs never saw (training used 42 and 43).
 Smoke run (plumbing only):
-  python aita_eval.py --dataset ... --conditions prompted random \
-      --eval_size 4 --posts_per_side 1
+  python aita_eval.py --benchmark pvq --conditions base prompted --eval_size 4
 """
 import argparse
 import json
@@ -27,11 +29,11 @@ from pathlib import Path
 import ray
 import torch
 
-from env import AITAEnv
+from env import AITAEnv, PVQEnv
 from workers import MODEL_PATH, TARGET_LAYERS, LAYER_TYPES, RANK
 
 HN_CONDITIONS = ("warmstart", "coldstart", "pathwise")
-ALL_CONDITIONS = ("prompted", "random") + HN_CONDITIONS
+ALL_CONDITIONS = ("base", "prompted", "random") + HN_CONDITIONS
 
 
 # ── Hypernetwork loading ──────────────────────────────────────────────────────
@@ -151,7 +153,10 @@ def make_random_condition(n: int, seed: int, b_scale: float, d_scale: float,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", required=True)
+    ap.add_argument("--benchmark", choices=["aita", "pvq"], default="aita")
+    ap.add_argument("--dataset", help="AITA json (needed for --benchmark aita)")
+    ap.add_argument("--quest_path", default=None,
+                    help="PVQ-RR questionnaire.txt (default: training path)")
     ap.add_argument("--conditions", nargs="+", default=list(ALL_CONDITIONS),
                     choices=ALL_CONDITIONS)
     ap.add_argument("--ckpt_warmstart")
@@ -166,27 +171,32 @@ def main():
     ap.add_argument("--random_d_mean", type=float, default=0.0)
     ap.add_argument("--hn_module", default=HN_MODULE,
                     help="python module containing the HyperNetwork class")
-    ap.add_argument("--out", default="results/aita")
+    ap.add_argument("--out", default=None,
+                    help="output dir (default: results/<benchmark>)")
     args = ap.parse_args()
 
     for c in args.conditions:
         if c in HN_CONDITIONS and getattr(args, f"ckpt_{c}") is None:
             ap.error(f"condition '{c}' needs --ckpt_{c}")
 
+    if args.benchmark == "aita" and not args.dataset:
+        ap.error("--benchmark aita needs --dataset")
+    args.out = args.out or f"results/{args.benchmark}"
+
     ray.init()
-    env = AITAEnv(
-        dataset_path=args.dataset,
-        posts_per_side=args.posts_per_side,
-        worker_types=args.conditions,
-        eval_size=args.eval_size,
-        rng_seed=args.seed,
-    )
+    common = dict(worker_types=args.conditions, eval_size=args.eval_size,
+                  rng_seed=args.seed)
+    if args.benchmark == "aita":
+        env = AITAEnv(dataset_path=args.dataset,
+                      posts_per_side=args.posts_per_side, **common)
+    else:
+        env = PVQEnv(quest_path=args.quest_path, **common)
     profiles = env.get_observation_batch()            # (N, 19), fixed by seed
 
     # Build each condition's adapters on the driver (HNs are small).
     actions, frozen = {}, {}
     for c in args.conditions:
-        if c == "prompted":
+        if c in ("base", "prompted"):
             actions[c] = None
         elif c == "random":
             actions[c], frozen[c] = make_random_condition(

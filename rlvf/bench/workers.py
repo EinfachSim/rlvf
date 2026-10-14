@@ -22,6 +22,7 @@ subclassed:
 """
 
 WORKERDICT = {   # condition -> adapter_mode
+    "base":      "none",        # plain base model: no adapter, no profile prompt
     "prompted":  "prompted",
     "random":    "vera",
     "warmstart": "vera",
@@ -68,7 +69,7 @@ def render_profile_prompt(profile: list[float]) -> str:
 @ray.remote(num_gpus=1, num_cpus=8)
 class BaseWorker:
     def __init__(self, adapter_mode: str, benchmark: str, runner_kwargs: dict):
-        assert adapter_mode in ("vera", "prompted")
+        assert adapter_mode in ("vera", "prompted", "none")
         self.adapter_mode = adapter_mode
         self.device = "cuda:0"
         self._hooks = []
@@ -94,6 +95,9 @@ class BaseWorker:
 
         # Benchmark logic, built in-process from the registry.
         self.runner = RUNNER_REGISTRY[benchmark](**runner_kwargs)
+        if hasattr(self.runner, "setup"):          # e.g. PVQ digit calibration,
+            with torch.no_grad():                  # done on the plain base model
+                self.runner.setup(self.model, self.tokenizer, self.device)
 
         print(f"[EnvWorker] Ready (adapter_mode={adapter_mode}, benchmark={benchmark}).")
 
@@ -149,8 +153,9 @@ class BaseWorker:
                     b_abs_mean=float(torch.cat(
                         [v.flatten() for v in b.values()]).abs().mean().item()),
                 )
-            else:
+            elif self.adapter_mode == "prompted":
                 system_prompt = render_profile_prompt(profile)
+            # "none": plain base model
 
             with torch.no_grad():
                 metrics = self.runner.run(
