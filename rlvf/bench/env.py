@@ -158,7 +158,7 @@ class AITAEnv(BaseEnv):
     stance; mean over values = one number per condition).
     """
 
-    def __init__(self, dataset_path: str, posts_per_eval: int = 200,
+    def __init__(self, dataset_path: str, posts_per_side: int = 10,
                  **base_kwargs):
         super().__init__(
             benchmark="aita",
@@ -168,7 +168,7 @@ class AITAEnv(BaseEnv):
         import json
         with open(dataset_path) as f:
             raw = json.load(f)
-        self.post_ids = aita_metrics.select_eval_posts(raw, posts_per_eval, self.rng)
+        self.post_ids = aita_metrics.select_eval_posts(raw, posts_per_side, self.rng)
         print(f"[AITAEnv] Fixed eval set: {len(self.post_ids)} posts")
 
     def _build_task(self, episode_idx: int) -> dict:

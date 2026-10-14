@@ -12,11 +12,11 @@ Usage:
   python aita_eval.py --dataset /path/aita_dataset_10_values_reduced.json \
       --ckpt_warmstart ... --ckpt_coldstart ... --ckpt_pathwise ... \
       [--conditions prompted random pathwise] [--eval_size 64] \
-      [--posts_per_eval 200] [--out results/aita]
+      [--posts_per_side 10] [--out results/aita]
 
 Smoke run (plumbing only):
   python aita_eval.py --dataset ... --conditions prompted random \
-      --eval_size 4 --posts_per_eval 20
+      --eval_size 4 --posts_per_side 1
 """
 import argparse
 import json
@@ -158,7 +158,8 @@ def main():
     ap.add_argument("--ckpt_coldstart")
     ap.add_argument("--ckpt_pathwise")
     ap.add_argument("--eval_size", type=int, default=64)
-    ap.add_argument("--posts_per_eval", type=int, default=200)
+    ap.add_argument("--posts_per_side", type=int, default=10,
+                    help="per value: this many posts where high-value says YTA, and as many where it says NTA")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--random_b_scale", type=float, default=1.0)
     ap.add_argument("--random_d_scale", type=float, default=0.1)
@@ -175,7 +176,7 @@ def main():
     ray.init()
     env = AITAEnv(
         dataset_path=args.dataset,
-        posts_per_eval=args.posts_per_eval,
+        posts_per_side=args.posts_per_side,
         worker_types=args.conditions,
         eval_size=args.eval_size,
         rng_seed=args.seed,
