@@ -1,7 +1,7 @@
 import torch
 """
-Architecture inspired by, adapted and simplified from ZHyper
-https://arxiv.org/pdf/2510.19733
+Architecture inspired by, adapted and simplified from Text-to-LoRA
+https://arxiv.org/pdf/2506.06105
 
 Adapter generation follows VeRA (Kopiczko et al., ICLR 2024)
 https://arxiv.org/abs/2310.11454

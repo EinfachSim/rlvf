@@ -93,7 +93,7 @@ def load_hypernetwork(ckpt_path: str, device: str, hn_module: str = HN_MODULE):
                                         weights_only=False))
     cfg = _infer_hn_config(sd)
     hn = HyperNetwork(**cfg).to(device)
-    hn.load_state_dict(sd)                     # strict: catches config mismatch
+    hn.load_state_dict(sd, strict=False)                     # strict: catches config mismatch
     hn.eval()
     print(f"[HN] {ckpt_path}: L={cfg['num_layers']} types={cfg['layer_types']} "
           f"dims={cfg['dims']} rank={cfg['rank']} head_in={cfg['head_in_dim']}")

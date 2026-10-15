@@ -79,7 +79,9 @@ def save_checkpoint(step: int):
 
 def load_checkpoint(path: str) -> int:
     ckpt = torch.load(path, map_location=DEVICE)
-    policy.load_state_dict(ckpt["model"])
+    result = policy.load_state_dict(ckpt["model"], strict=False)
+    print(result.missing_keys)
+    print(result.unexpected_keys)
     optimizer.load_state_dict(ckpt["optimizer"])
     print(f"[train] Resumed from {path} (step {ckpt['step']})")
     return ckpt["step"]

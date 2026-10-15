@@ -70,7 +70,9 @@ optimizer = torch.optim.Adam(policy.parameters(), lr=LR)
 
 if args.init_from:
     ckpt = torch.load(args.init_from, map_location=DEVICE)
-    policy.load_state_dict(ckpt["model"])
+    result = policy.load_state_dict(ckpt["model"], strict=False)
+    print(result.missing_keys)
+    print(print(result.unexpected_keys))
     print(f"[train] Warm-started from {args.init_from} (step {ckpt['step']})")
 
 print("Spawning environment workers...")
