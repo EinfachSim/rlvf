@@ -1,25 +1,3 @@
-"""
-train_token_pg.py
-
-Token-level policy gradient — "tokens as actions", RLHF-shaped, one epoch per
-batch (ratio ≡ 1, so no clipping machinery is needed; adding true multi-epoch
-PPO would require one extra worker round trip per epoch to recompute per-token
-log-probs — see design_notes_rlvf.md §3).
-
-Per episode, the worker: samples the 57 answers from the renormalized 6-way
-digit distributions of the ADAPTED model; computes the TRUE DISCRETE score;
-computes exact leave-one-out counterfactual advantages per item (closed-form
-baseline — no critic); backprops
-    L = Σ_i [ -logπ_i(a_i)·adv_i - ent_coef·H_i 
-        + tok_kl_weight · mean_i KL_i(adapted‖base @ answer pos)
-        + kl_weight · KL_domain
-through the frozen LLM to (b, d) and ships the gradients back. The head node
-applies the identical VJP surrogate as the pathwise trainer.
-
-Recommended use: initialize from a pathwise checkpoint (SFT-analog), then run
-this on the discrete metric (RL stage).
-"""
-
 from pathlib import Path
 import ray
 import torch
@@ -52,12 +30,12 @@ DIMS            = {"q": [4096, 4096], "v": [1024, 4096]}
 PROFILE_DIM     = 19
 RANK            = 8
 
-LR              = 3e-5          # PG is noisier than pathwise — smaller lr
+LR              = 3e-5
 GRAD_CLIP       = 1.0
 BATCH_SIZE      = 64
-KL_WEIGHT       = 0.1           # domain-text KL weight
-TOK_KL_WEIGHT   = 0.00          # per-answer-position KL weight
-ENT_COEF        = 0.0
+KL_WEIGHT       = 0.1 #for generation-keeping
+TOK_KL_WEIGHT   = 0.00 #not used, was a stupid idea
+ENT_COEF        = 0.0 #not used
 TEMPERATURE     = 1.0
 
 TOTAL_STEPS     = 1000
@@ -150,7 +128,7 @@ try:
         ok = res["ok"]
         n_ok = int(ok.sum().item())
         if n_ok == 0:
-            print(f"[train] step {step:04d} | ALL episodes failed — skipping update")
+            print(f"[train] step {step:04d} | All episodes failed, skipping update")
             continue
         g_d = res["grad_d"].to(DEVICE)
         g_b = {k: v.to(DEVICE) for k, v in res["grad_b"].items()}
@@ -224,8 +202,7 @@ try:
             save_checkpoint(step)
 
 finally:
-    # Always flush a checkpoint on exit — including SIGTERM /
-    # scancel — so preempted jobs resume instead of restarting.
+    #to always flush checkpoints, but this still doesnt work on slurm timeouts, not sure why
     save_checkpoint(_last_step)
 
 print("Training complete.")

@@ -2,7 +2,7 @@ import numpy as np
 
 
 # The 19 Schwartz PVQ-RR values in their theoretical circumplex order.
-# We space them uniformly at 2π/19 intervals as an approximation.
+# space them uniformly at 2π/19 intervals as an approximation.
 VALUE_NAMES = [
     "SD-Thought", "SD-Action", "Stimulation", "Hedonism",
     "Achievement", "Power-Dom", "Power-Res", "Face",
@@ -30,9 +30,9 @@ def _build_circumplex_corr(angles: np.ndarray, noise: float = 0.0, rng=None) -> 
     if noise > 0.0:
         raw = rng.normal(0, noise, size=(n, n))
         sym = (raw + raw.T) / 2.0
-        np.fill_diagonal(sym, 0.0)          # don't perturb diagonal
+        np.fill_diagonal(sym, 0.0) # don't perturb diagonal
         corr = corr + sym
-        np.fill_diagonal(corr, 1.0)         # restore exact 1s
+        np.fill_diagonal(corr, 1.0) # restore exact 1s
 
     # Project to nearest PSD matrix (clip negative eigenvalues)
     vals, vecs = np.linalg.eigh(corr)
@@ -56,12 +56,12 @@ def _compute_remap_params(corr: np.ndarray, n_calibration: int = 100_000, rng=No
     Returns (p01, p99) computed element-wise across values.
     """
     if rng is None:
-        rng = np.random.default_rng(0)   # fixed seed for reproducibility
+        rng = np.random.default_rng(0)
 
     n_values = corr.shape[0]
     raw = rng.multivariate_normal(np.zeros(n_values), corr, size=n_calibration)
     # Per-value percentiles so each dimension is remapped independently
-    p01 = np.percentile(raw, 1, axis=0)   # shape (n_values,)
+    p01 = np.percentile(raw, 1, axis=0) # shape (n_values,)
     p99 = np.percentile(raw, 99, axis=0)
     return p01, p99
 
@@ -70,21 +70,6 @@ class ValueProfileSampler:
     """
     Samples synthetic personality profiles consistent with the Schwartz PVQ-RR
     circumplex structure.
-
-    Key design decisions vs. the original implementation
-    ----------------------------------------------------
-    1. Uniform 2π/19 angular spacing (honest approximation; update _ANGLES_RAD
-       with empirical MDS positions from Schwartz et al. 2012 if needed).
-    2. Fixed, pre-computed remapping parameters derived from a large calibration
-       sample so that the Likert-scale mapping is deterministic and
-       batch-size-independent.
-    3. Ipsatization (subtracting each respondent's mean) before returning,
-       which is standard practice for PVQ data (Schwartz recommends this to
-       capture relative value priorities rather than acquiescence bias).
-    4. Per-value percentile remapping instead of a global percentile that
-       conflated value and profile dimensions.
-    5. Soft sigmoid squashing instead of hard linear clipping, producing a
-       smoother distribution without boundary mass accumulation.
 
     Parameters
     ----------
@@ -115,13 +100,8 @@ class ValueProfileSampler:
         self.corr = _build_circumplex_corr(_ANGLES_RAD, noise=noise, rng=self.rng)
 
         # Pre-compute remapping params from a large calibration draw
-        # (separate rng with fixed seed so this is always reproducible)
         cal_rng = np.random.default_rng(42)
         self._p01, self._p99 = _compute_remap_params(self.corr, rng=cal_rng)
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def sample_batch(self, num: int = 1) -> np.ndarray:
         """
@@ -137,10 +117,10 @@ class ValueProfileSampler:
         # Draw from the multivariate normal prior
         raw = self.rng.multivariate_normal(
             np.zeros(self.n_values), self.corr, size=num
-        )  # (num, 19)
+        ) # (num, 19)
 
         # Map to [1, 6] using fixed, per-value parameters
-        likert = self._to_likert(raw)  # (num, 19)
+        likert = self._to_likert(raw) # (num, 19)
 
         if self.ipsatize:
             likert = likert - likert.mean(axis=1, keepdims=True)
@@ -167,7 +147,7 @@ class ValueProfileSampler:
         )
         sample_corr = np.corrcoef(raw.T)
         diff = np.abs(sample_corr - self.corr)
-        np.fill_diagonal(diff, 0.0)   # ignore trivial diagonal
+        np.fill_diagonal(diff, 0.0) # ignore trivial diagonal
         return {
             "max_abs_error": diff.max(),
             "mean_abs_error": diff.mean(),
@@ -210,27 +190,12 @@ class ValueProfileSampler:
         # Linear standardisation to [-2.5, 2.5] using per-value p01/p99
         span = np.where(self._p99 - self._p01 > 1e-8,
                         self._p99 - self._p01,
-                        1.0)                          # guard against degeneracy
-        standardised = (raw - self._p01) / span * 5.0 - 2.5  # (num, 19)
+                        1.0) # guard against degeneracy
+        standardised = (raw - self._p01) / span * 5.0 - 2.5 # (num, 19)
 
-        # Sigmoid squash — temp controls steepness (1.0 ≈ moderate spread)
-        squashed = 1.0 / (1.0 + np.exp(-standardised / temp))  # (0, 1)
+        # Sigmoid squash
+        squashed = 1.0 / (1.0 + np.exp(-standardised / temp)) # (0, 1)
 
-        # Map to open interval (1, 6) — avoids boundary mass at 1 and 6
+        # Map to open interval (1, 6)
         likert = 1.0 + 5.0 * squashed
         return likert
-
-
-# ---------------------------------------------------------------------------
-# Quick self-test
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    sampler = ValueProfileSampler(noise=0.05, ipsatize=True, rng=0)
-    sampler.print_summary(n=20_000)
-
-    # Visual check: first 3 profiles
-    batch = sampler.sample_batch(3)
-    print("\nFirst 3 profiles:")
-    for i, profile in enumerate(batch):
-        vals = ", ".join(f"{v:+.2f}" for v in profile)
-        print(f"  [{i}] {vals}")
