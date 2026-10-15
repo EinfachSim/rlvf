@@ -7,52 +7,6 @@ import fcntl
 
 import re
 
-"""
-EnvWorker with two operating modes on shared plumbing:
-
-A) run_episode(...)        — reward-only (PPO baseline / eval). Unchanged
-                             semantics from the previous round, plus a
-                             discrete-argmax score in the result dict.
-B) run_episode_grad(...)   — GRADIENT interface for the pathwise and
-                             token-level-PG trainers. Builds (b, d) as leaf
-                             tensors with requires_grad=True, applies the fp32
-                             hooks, computes the episode loss, backpropagates
-                             THROUGH THE FROZEN LLM, and returns
-                             grad_b (dict per type), grad_d — each the same
-                             shape as the action (~0.66 MB fp32/episode).
-
-   mode="pathwise": L = -(score_smooth) + kl_weight * KL_domain
-       Exact gradient of the smooth expected-value reward. Deterministic —
-       no sampling anywhere.
-   mode="token_pg": one-epoch token-level policy gradient. Answers are
-       SAMPLED from the renormalized 6-way digit distribution; reward is the
-       true DISCRETE score; per-item advantages are exact leave-one-out
-       counterfactuals (score is a known function of the 57 answers, so the
-       per-item baseline E_{a~pi_i}[score | others fixed] is computed in
-       closed form — no critic needed);
-       L = sum_i [ -logpi_i(a_i) * adv_i - ent_coef * H_i ]
-           + tok_kl_weight * mean_i KL_i(adapted || base at answer position)
-           + kl_weight * KL_domain (optional, DOMAIN_KL_IN_LOSS)
-
-MEMORY / NUMERICS
------------------
-- All LLM params are frozen (requires_grad_(False)): backward stores
-  activations only, no param grads, no optimizer state.
-- gradient checkpointing (non-reentrant) + enable_input_require_grads(): the
-  known-good recipe for frozen-model + injected-adapter training.
-- The quest forward is chunked (QUEST_CHUNK rows/backward). The score couples
-  all 57 answers, so we split the chain rule manually: pass 1 (no_grad) gets
-  all answers; d(score)/d(answers) is computed on a tiny 57-dim autograd
-  graph; pass 2 re-forwards each chunk WITH grad and backprops
-  (answers_chunk * g_ans_chunk).sum(). This is exact (not an approximation)
-  because d L/d b = sum_j dL/dans_j * dans_j/db, and requires only that the
-  two passes are deterministic (eval mode, no dropout — holds).
-- DTYPE: float16 to match the existing base_logits.pt. If backward produces
-  NaN/Inf (fp16 overflow), switch DTYPE to torch.bfloat16 (Ampere+) AND
-  regenerate base_logits.pt in bf16 so the KL baseline still reads ~0.
-  Non-finite grads are detected and reported as failed episodes either way.
-"""
-
 MODEL_PATH  = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/models/Mistral-7B-Instruct-v0.3"
 DATA_PATH   = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/data/base_logits.pt"
 QUEST_PATH  = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/data/questionnaire.txt"
@@ -62,11 +16,12 @@ TARGET_LAYERS = list(range(32))
 LAYER_TYPES   = ["q", "v"]
 RANK          = 8
 
-DTYPE             = torch.float16   # see numerics note above
+DTYPE             = torch.float16
 GRAD_CHECKPOINT   = True
-QUEST_CHUNK       = 16     # questionnaire rows per backward micro-batch
-DOMAIN_CHUNK      = 8      # domain-text rows per backward micro-batch
-DOMAIN_KL_IN_LOSS = True   # include KL_domain gradient in token_pg mode too
+QUEST_CHUNK       = 16 # questionnaire rows per backward micro-batch
+DOMAIN_CHUNK      = 8 # kl-text rows per backward micro-batch
+#need to rename, I dont do domain KL, but KL on dolly
+DOMAIN_KL_IN_LOSS = True   # include KL_domain gradient in token_pg mode too,
 
 FAILURE_SCORE  = -10.0
 MIN_DIGIT_MASS = 0.05
@@ -120,7 +75,7 @@ class EnvWorker:
             self.model.eval()
             print(f"[EnvWorker] Model loaded, releasing lock.")
 
-        # Freeze everything: backward stores activations only.
+        # backward stores activations only
         for p in self.model.parameters():
             p.requires_grad_(False)
         if GRAD_CHECKPOINT:
@@ -215,10 +170,10 @@ class EnvWorker:
         for li, layer_idx in enumerate(TARGET_LAYERS):
             attn = self.model.model.layers[layer_idx].self_attn
             for ti, t in enumerate(LAYER_TYPES):
-                d_lt = d[li, ti]                                   # (rank,)
-                b_lt = b[t][li]                                    # (d_out,)
-                A_lt = A[t][li].to(self.device, torch.float32)     # (rank, d_in)
-                B_lt = B[t][li].to(self.device, torch.float32)     # (d_out, rank)
+                d_lt = d[li, ti] # (rank,)
+                b_lt = b[t][li] # (d_out,)
+                A_lt = A[t][li].to(self.device, torch.float32) # (rank, d_in)
+                B_lt = B[t][li].to(self.device, torch.float32) # (d_out, rank)
                 proj = attn.q_proj if t == "q" else attn.v_proj
 
                 def hook(module, inputs, output,
@@ -271,8 +226,8 @@ class EnvWorker:
 
     def _domain_kl_with_grad(self, weight: float) -> float:
         """
-        Differentiable KL(base || adapted) over the domain texts, backpropagated
-        chunk-by-chunk (additive over token positions => exact). Each chunk's
+        Differentiable KL(base || adapted) over the reference texts (not domain, need to rename), 
+        backpropagated chunk-by-chunk (additive over token positions => exact). Each chunk's
         (weight * kl_chunk_sum / total_mask) is backward()ed immediately so
         activations are freed; grads accumulate on the b, d leaves.
         Returns the scalar KL value (for logging).
@@ -350,7 +305,7 @@ class EnvWorker:
                 mass = mass2
             else:
                 print("[Diag] WARNING: low digit mass and first token is not "
-                      "whitespace — inspect the prompt format.")
+                      "whitespace, inspect the prompt format.")
         self._base_digit_mass = mass
 
     def _quest_logits_chunk(self, rows: slice):
@@ -371,7 +326,7 @@ class EnvWorker:
 
     def _score_torch(self, answers, profile_t):
         """Differentiable port of the numpy scoring. answers (57,), profile (19,)."""
-        dim_means = answers[self._scoring_idx].mean(dim=1)          # (19,)
+        dim_means = answers[self._scoring_idx].mean(dim=1) # (19,)
         answered_profile = dim_means - answers.mean()
         return -((answered_profile - profile_t) ** 2).mean()
 
@@ -400,7 +355,7 @@ class EnvWorker:
         if digit_mass < MIN_DIGIT_MASS:
             raise ValueError(
                 f"Digit probability mass collapsed to {digit_mass:.4f} "
-                f"(< {MIN_DIGIT_MASS}) — adapter broke the model")
+                f"(< {MIN_DIGIT_MASS}), adapter broke the model")
         return answers, digit_mass, norm
 
     # ── Reward-only episode (PPO baseline / eval) ─────────────────────────────
@@ -428,7 +383,7 @@ class EnvWorker:
             profile_t = torch.tensor(profile, device=self.device,
                                      dtype=torch.float32)
             score = float(self._score_torch(answers, profile_t).item())
-            # discrete-argmax score (the "hard" metric)
+            # discrete-argmax score for logging
             disc = (norm.argmax(dim=-1).float() + 1.0)
             score_disc = float(self._score_torch(disc, profile_t).item())
 
@@ -486,7 +441,7 @@ class EnvWorker:
                          mass_coef: float = 0.1,
                          seed: int = None) -> dict:
         """
-        Returns loss gradients wrt (b, d) — i.e. the head node MINIMIZES the
+        Returns loss gradients wrt (b, d), i.e. the head node minimizes the
         surrogate sum((b, grad_b)) + sum((d, grad_d)).
         """
         import time
@@ -514,14 +469,11 @@ class EnvWorker:
                 ans_leaf = answers.detach().clone().requires_grad_(True)
                 score_t = self._score_torch(ans_leaf, profile_t)
                 (-score_t).backward()
-                g_ans = ans_leaf.grad.detach()               # (57,)
+                g_ans = ans_leaf.grad.detach() # (57,)
                 score = float(score_t.item())
                 # PASS 2: chunked re-forward WITH grad; exact chain rule.
-                # The score renormalizes by digit mass, making it INVARIANT to
-                # mass — an unpenalized direction the optimizer exploited in
-                # the first 8h run (mass 1.00 -> 0.63, episodes collapsing).
-                # The -mass_coef*log(mass) term makes answering-with-a-digit
-                # part of the objective: ~0 at mass≈1, steep as mass drops.
+                # The score renormalizes by digit mass, making it invariant to
+                # mass, which is why mass penalty is needed
                 mass_pen_total = 0.0
                 for lo in range(0, n_items, QUEST_CHUNK):
                     rows = slice(lo, min(lo + QUEST_CHUNK, n_items))
@@ -543,11 +495,11 @@ class EnvWorker:
                     torch.manual_seed(seed)
                 samp_p = norm if temperature == 1.0 else F.normalize(
                     norm.clamp_min(1e-12) ** (1.0 / temperature), p=1, dim=-1)
-                a_idx = torch.multinomial(samp_p, 1).squeeze(-1)     # (57,) in 0..5
-                a_val = a_idx.float() + 1.0                          # digits 1..6
+                a_idx = torch.multinomial(samp_p, 1).squeeze(-1) # (57,) in 0..5
+                a_val = a_idx.float() + 1.0
                 score = float(self._score_torch(a_val, profile_t).item())
 
-                # Exact leave-one-out baselines: E_{a~pi_i}[score | others fixed]
+                # LOO baselines
                 with torch.no_grad():
                     baselines = torch.zeros(n_items, device=self.device)
                     for i in range(n_items):
@@ -557,26 +509,29 @@ class EnvWorker:
                             ans_v[i] = float(v + 1)
                             s_i[v] = self._score_torch(ans_v, profile_t)
                         baselines[i] = (samp_p[i] * s_i).sum()
-                    adv = score - baselines                           # (57,)
+                    adv = score - baselines # (57,)
                 info["adv_std"] = float(adv.std().item())
 
                 # second pass chunked, policy-gradient + entropy + per-answer KL
+                # a lot of this is not needed since the entropy and per-answer KL
+                # multipliers are set to 0 (dont make sense after all)
+                # need to refactor if i have time
                 kl_tok_total = 0.0
                 ent_total = 0.0
                 for lo in range(0, n_items, QUEST_CHUNK):
                     rows = slice(lo, min(lo + QUEST_CHUNK, n_items))
-                    logits = self._quest_logits_chunk(rows)          # (n, V)
+                    logits = self._quest_logits_chunk(rows)  # (n, V)
                     _, _, p_chunk = self._digits_from_logits(logits)
                     logp_chunk = torch.log(p_chunk.clamp_min(1e-12)) # (n, 6)
                     idx = a_idx[rows].unsqueeze(-1)
-                    logpi = logp_chunk.gather(1, idx).squeeze(-1)    # (n,)
-                    H = -(p_chunk * logp_chunk).sum(dim=-1)          # (n,)
-                    log_q_full = F.log_softmax(logits, dim=-1)       # (n, V)
+                    logpi = logp_chunk.gather(1, idx).squeeze(-1) # (n,)
+                    H = -(p_chunk * logp_chunk).sum(dim=-1) # (n,)
+                    log_q_full = F.log_softmax(logits, dim=-1) # (n, V)
                     # KL(adapted || base) at the answer position, full vocab
                     kl_i = (log_q_full.exp() *
                             (log_q_full - self._base_ans_logp[rows])
                             ).sum(dim=-1)                            # (n,)
-                    m_chunk = p_chunk.new_zeros(1)  # placeholder; recompute mass
+                    m_chunk = p_chunk.new_zeros(1)
                     probs_full = F.softmax(logits, dim=-1)
                     mass_chunk = torch.stack(
                         [probs_full[:, ids].sum(-1)
@@ -600,7 +555,7 @@ class EnvWorker:
                 else:
                     kl = self._compute_kl(*self._get_adapted_logits())
                 reward = score - tok_kl_weight * kl_tok - kl_weight * kl
-                info["score_disc"] = score   # token_pg score IS discrete
+                info["score_disc"] = score
 
             # Collect gradients; non-finite => failed episode
             gb = {k: v.grad.detach().cpu().numpy().astype(np.float32)
