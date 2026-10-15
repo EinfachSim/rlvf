@@ -5,21 +5,6 @@ from abc import ABC, abstractmethod
 from rlvf.data import ValueProfileSampler
 from rlvf.workers import EnvWorker
 
-"""
-CHANGES vs previous version
----------------------------
-1. Actions are (b, d) in the paper-faithful VeRA layout:
-       b: dict k -> (batch, L, d_out[k]);  d: (batch, L*T, rank).
-2. self.last_scores / self.last_kls / self.last_digit_mass / self.last_errors /
-   self.last_delta_fro are now actually populated after every _run_pool call —
-   train.py's `hasattr(env, "last_scores")` branch was dead code before, which
-   is why the run CSV contained no score/KL decomposition.
-3. eval_batch also returns eval_score_mean / eval_kl_mean (train.py already
-   had handling for those keys).
-4. Per-worker adapter-id debug print is now behind `verbose`.
-"""
-
-
 class BaseEnv(ABC):
     @abstractmethod
     def get_observation_batch(self, batch_size: int) -> torch.Tensor:
@@ -76,7 +61,7 @@ class RLVFEnv(BaseEnv):
         self.train_sampler = ValueProfileSampler(rng=rng_seed)
         eval_sampler       = ValueProfileSampler(rng=rng_seed + 1)
 
-        # Fixed eval profiles — never changes after init
+        # Fixed eval profiles
         eval_np            = eval_sampler.sample_batch(eval_size)
         self.eval_profiles = torch.tensor(eval_np, dtype=torch.float32)
 
@@ -94,14 +79,14 @@ class RLVFEnv(BaseEnv):
     def get_observation_batch(self, batch_size: int) -> torch.Tensor:
         """Sample fresh Schwartz profiles for a training batch."""
         profiles = self.train_sampler.sample_batch(batch_size)
-        return torch.tensor(profiles, dtype=torch.float32)  # (batch_size, 19)
+        return torch.tensor(profiles, dtype=torch.float32) # (batch_size, 19)
 
     def step_batch(
         self,
-        action_batch,                 # (b, d): b dict k->(B, L, d_out[k]); d (B, L*T, rank)
-        states: torch.Tensor,         # (batch_size, 19)
-        A: dict,                      # {"q": (L, rank, d_in), "v": ...}
-        B: dict,                      # {"q": (L, d_out, rank), "v": ...}
+        action_batch, # (b, d): b dict k->(B, L, d_out[k]); d (B, L*T, rank)
+        states: torch.Tensor, # (batch_size, 19)
+        A: dict, # {"q": (L, rank, d_in), "v": ...}
+        B: dict, # {"q": (L, d_out, rank), "v": ...}
     ) -> torch.Tensor:
         """
         Fan out batch to workers, collect rewards.
@@ -117,7 +102,7 @@ class RLVFEnv(BaseEnv):
     ) -> dict:
         """
         Run a batch of episodes on the fixed eval profiles.
-        Returns diagnostics dict — call every N steps, no PPO update.
+        Returns diagnostics dict
         """
         assert action_batch[1].shape[0] == len(self.eval_profiles), \
             f"eval action_batch must have {len(self.eval_profiles)} rows"
@@ -138,12 +123,12 @@ class RLVFEnv(BaseEnv):
 
     def step_batch_grad(
         self,
-        action_batch,                 # (b, d) as in step_batch
+        action_batch, # (b, d) as in step_batch
         states: torch.Tensor,
         A: dict,
         B: dict,
         mode: str = "pathwise",
-        grad_kwargs: dict = None,     # tok_kl_weight, ent_coef, temperature...
+        grad_kwargs: dict = None,
     ) -> dict:
         """
         Fan out gradient episodes. Workers return dL/db, dL/dd per episode
@@ -184,7 +169,7 @@ class RLVFEnv(BaseEnv):
         for k in results[0]["grad_b"]:
             grad_b[k] = torch.stack([
                 torch.from_numpy(r["grad_b"][k]) for r in results
-            ])                                          # (n, L, d_out)
+            ]) # (n, L, d_out)
 
         self.last_scores = torch.tensor([r["score"] for r in results],
                                         dtype=torch.float32)
@@ -243,7 +228,7 @@ class RLVFEnv(BaseEnv):
             [r["reward"] for r in results], dtype=torch.float32
         )
 
-        # Populate diagnostics (previously train.py's hasattr checks were dead)
+        # Populate diagnostics
         self.last_scores = torch.tensor(
             [r["score"] for r in results], dtype=torch.float32)
         self.last_scores_disc = torch.tensor(
@@ -272,7 +257,7 @@ class RLVFEnv(BaseEnv):
     ) -> list[list[dict]]:
         # Distribute n episodes as evenly as possible across workers
         base  = n // self.num_workers
-        extra = n % self.num_workers  # first `extra` workers get one more episode
+        extra = n % self.num_workers 
 
         payloads = []
         idx = 0
