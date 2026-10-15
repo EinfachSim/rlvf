@@ -1,15 +1,3 @@
-"""
-train_pathwise.py
-
-Pathwise (fully differentiable) trainer for the hypernetwork.
-Head node: hypernetwork forward (deterministic) -> ship (b, d) -> workers
-return per-episode dL/db, dL/dd (L = -(smooth score) + kl_weight*KL) ->
-head recomputes the cheap hypernetwork forward with grad and backprops the
-VJP surrogate  mean_i [ <b_i, g_b_i> + <d_i, g_d_i> ]  -> Adam step.
-This equals end-to-end backprop with the chain rule split at (b, d); see
-design_notes_rlvf.md §1 and §3. No sampling, no ratios, no critic.
-"""
-
 from pathlib import Path
 import ray
 import torch
@@ -38,13 +26,11 @@ DIMS            = {"q": [4096, 4096], "v": [1024, 4096]}
 PROFILE_DIM     = 19
 RANK            = 8
 
-LR              = 1e-4          # supervised-style; exact gradients
+LR              = 1e-4
 GRAD_CLIP       = 1.0
 BATCH_SIZE      = 64
 KL_WEIGHT       = 0.1
-MASS_COEF       = 0.1   # weight of -log(digit_mass): keeps "answers with a
-                        # digit" in the objective; the score itself is
-                        # renormalized and therefore blind to mass
+MASS_COEF       = 0.1
 
 TOTAL_STEPS     = 1000
 EVAL_EVERY      = 5
@@ -111,14 +97,14 @@ try:
         _last_step = step
 
         # 1. Fresh profiles
-        states = env.get_observation_batch(env.batch_size).to(DEVICE)   # (B, 19)
+        states = env.get_observation_batch(env.batch_size).to(DEVICE) # (B, 19)
 
         # 2. Deterministic actions to ship (no grad needed for the rollout copy)
         with torch.no_grad():
             b_ship, d_ship = policy.act(states)
         A, B = policy.A, policy.B
 
-        # 3. Workers compute rewards AND dL/d(b, d)
+        # 3. Workers compute rewards and dL/d(b, d)
         res = env.step_batch_grad(
             action_batch=({k: v.cpu() for k, v in b_ship.items()}, d_ship.cpu()),
             states=states.cpu(), A=A, B=B, mode="pathwise",
@@ -129,12 +115,12 @@ try:
         if n_ok == 0:
             print(f"[train] step {step:04d} | ALL episodes failed — skipping update")
             continue
-        g_d = res["grad_d"].to(DEVICE)                    # (B, L*T, r)
+        g_d = res["grad_d"].to(DEVICE) # (B, L*T, r)
         g_b = {k: v.to(DEVICE) for k, v in res["grad_b"].items()}
 
-        # 4. VJP surrogate — autograd sums per-episode VJPs into policy grads.
+        # 4. VJP surrogate, autograd sums per-episode VJPs into policy grads.
         #    Failed episodes contribute zero grads by construction; divide by n_ok.
-        b2, d2 = policy.act(states)                       # WITH grad
+        b2, d2 = policy.act(states) # with grad
         surrogate = (d2 * g_d.detach()).sum()
         for k in g_b:
             surrogate = surrogate + (b2[k] * g_b[k].detach()).sum()
@@ -150,10 +136,6 @@ try:
         mass_pens = torch.tensor([r.get("mass_penalty", float("nan"))
                                   for r in res["results"]])
         log_dict = {
-            # UNFILTERED means (failures counted at FAILURE_SCORE) — directly
-            # comparable to eval. The *_ok variants exclude failures; the first
-            # 8h run logged only ok-means, which masked the failure population
-            # and made train/eval look like they diverged.
             "train/reward_mean": rewards.mean().item(),
             "train/reward_std":  rewards.std().item(),
             "train/reward_mean_ok": rewards[ok].mean().item(),
@@ -179,7 +161,7 @@ try:
             f"err: {env.last_errors}"
         )
 
-        # 6. Eval — deterministic reward-only episodes on the fixed eval profiles
+        # 6. Eval, deterministic reward-only episodes on the fixed eval profiles
         if step % EVAL_EVERY == 0:
             eval_states = env.eval_profiles.to(DEVICE)
             with torch.no_grad():
@@ -207,8 +189,7 @@ try:
             save_checkpoint(step)
 
 finally:
-    # Always flush a checkpoint on exit — including SIGTERM /
-    # scancel — so preempted jobs resume instead of restarting.
+    #this does not work as intended but is not really needed
     save_checkpoint(_last_step)
 
 print("Training complete.")
