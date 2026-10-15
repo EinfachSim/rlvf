@@ -6,37 +6,11 @@ https://arxiv.org/pdf/2510.19733
 
 Adapter generation follows VeRA (Kopiczko et al., ICLR 2024)
 https://arxiv.org/abs/2310.11454
-
-PARAMETERIZATION (paper-faithful VeRA)
---------------------------------------
-    ΔW = Λ_b · B · Λ_d · A
-with, per adapted layer & type:
-    d ∈ R^rank      (scales rows of A)
-    b ∈ R^{d_out}   (scales rows of the final matrix — OUTPUT dimension)
-Because b acts on output coordinates, it is NOT absorbable into d: no
-degeneracy (unlike the earlier b, d ∈ R^rank variant where only b∘d mattered).
-
-Init follows the paper: b-mean starts at ~0 ("the weight matrix is unaffected
-during the first forward pass"), d-mean starts at D_INIT = 0.1 (paper default;
-the paper's ablation finds 1e-7 also works, 1.0 does not).
-
-ACTION SPACE WARNING
---------------------
-The stochastic action is (b, d):
-    b["q"]: (num_layers, 4096), b["v"]: (num_layers, 1024),
-    d: (num_layers*types, rank)
-Total action dim = num_layers*(d_out_q + d_out_v) + num_layers*types*rank
-                 = 32*(4096+1024) + 512 = 164,352 for the default config.
-Joint log-probs / KL / entropy all scale with this. See train.py notes.
-
-Everything else from the previous fix round is retained: joint log-prob (no
-normalization), soft-bounded log_std (raw 0 -> -2.0, smooth gradient),
-deterministic eval mode, dropout=0 in the policy trunk.
 """
 
 LOG_STD_MIN = -4.0
-LOG_STD_MAX = 0.0   # midpoint = -2.0
-D_INIT = 0.1        # VeRA paper default init for the d vector
+LOG_STD_MAX = 0.0 
+D_INIT = 0.1 # VeRA default init from the paper for d
 
 
 class Mixer(torch.nn.Module):
@@ -85,7 +59,9 @@ class MLPProjection(torch.nn.Module):
     def forward(self, x):
         return self.layers(x)
 
-
+# this was originally implemented to be used as a stochastic policy in PPO,
+# but the stochastic path is not used anymore (see thesis, HN is always deterministic)
+# honestly I need to refactor this, but only when I have time
 class HyperNetwork(torch.nn.Module):
     def __init__(self, num_layers=5, layer_types=["q", "v"],
                  dims={"q": [10, 20], "v": [10, 20]},
@@ -101,8 +77,8 @@ class HyperNetwork(torch.nn.Module):
         # d_out per type (rows of the adapted weight matrix = dims[k][0])
         self.d_out = {k: dims[k][0] for k in layer_types}
         self.action_dim = (
-            num_layers * sum(self.d_out[k] for k in layer_types)   # b
-            + num_layers * self.num_types * rank                   # d
+            num_layers * sum(self.d_out[k] for k in layer_types) # b
+            + num_layers * self.num_types * rank # d
         )
 
         # Precomputed layer and type batches
@@ -166,7 +142,7 @@ class HyperNetwork(torch.nn.Module):
             torch.nn.init.zeros_(head.bias)
             self.b_head_mean[k] = head
 
-        # Raw log_std params; 0.0 maps to log_std = -2.0 (see _soft_bound).
+        # Raw log_std params; 0.0 maps to log_std = -2.0.
         self.log_std_raw_d = torch.nn.Parameter(
             torch.zeros(self.num_layers * self.num_types, rank)
         )
@@ -221,7 +197,7 @@ class HyperNetwork(torch.nn.Module):
         x = self.mlp1(x)
         x = self.mlp2(x)
         x = self.mlp3(x)
-        return x                                  # (B, L*T, head_in_dim)
+        return x # (B, L*T, head_in_dim)
 
     def forward(self, x):
         """
@@ -231,12 +207,12 @@ class HyperNetwork(torch.nn.Module):
         b_mean : dict k -> (B, L, d_out[k])
         """
         h = self._trunk(x)
-        d_mean = self.d_head_mean(h)              # (B, L*T, rank)
+        d_mean = self.d_head_mean(h) # (B, L*T, rank)
         b_mean = {}
         for k in self.layer_types:
-            mask = getattr(self, f"pos_mask_{k}")     # (L*T,)
-            h_k = h[:, mask, :]                       # (B, L, head_in)
-            b_mean[k] = self.b_head_mean[k](h_k)      # (B, L, d_out[k])
+            mask = getattr(self, f"pos_mask_{k}") # (L*T,)
+            h_k = h[:, mask, :] # (B, L, head_in)
+            b_mean[k] = self.b_head_mean[k](h_k) # (B, L, d_out[k])
         return d_mean, b_mean
 
     def _dists(self, x):
@@ -259,8 +235,6 @@ class HyperNetwork(torch.nn.Module):
         Action format: (b, d) with
             b : dict k -> (B, num_layers, d_out[k])
             d : (B, num_layers*num_types, rank)
-        Log-prob is the JOINT log density over all of b and d (no
-        normalization — the PPO ratio must be the true importance ratio).
         """
         dist_d, dist_b = self._dists(x)
 
@@ -276,7 +250,7 @@ class HyperNetwork(torch.nn.Module):
         if deterministic:
             d = dist_d.base_dist.loc
             b = {k: dist_b[k].base_dist.loc for k in self.layer_types}
-        else:
+        else: #old branch, not used
             d = dist_d.rsample()
             b = {k: dist_b[k].rsample() for k in self.layer_types}
 
