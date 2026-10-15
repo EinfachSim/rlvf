@@ -5,3 +5,4 @@ env/
 *.zip
 .DS_STORE
 design_notes.md
+test.py

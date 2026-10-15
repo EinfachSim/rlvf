@@ -1,5 +1,4 @@
 import torch
-from torch.distributions import Normal, Independent
 """
 Architecture inspired by, adapted and simplified from ZHyper
 https://arxiv.org/pdf/2510.19733
@@ -8,8 +7,6 @@ Adapter generation follows VeRA (Kopiczko et al., ICLR 2024)
 https://arxiv.org/abs/2310.11454
 """
 
-LOG_STD_MIN = -4.0
-LOG_STD_MAX = 0.0 
 D_INIT = 0.1 # VeRA default init from the paper for d
 
 
@@ -59,9 +56,6 @@ class MLPProjection(torch.nn.Module):
     def forward(self, x):
         return self.layers(x)
 
-# this was originally implemented to be used as a stochastic policy in PPO,
-# but the stochastic path is not used anymore (see thesis, HN is always deterministic)
-# honestly I need to refactor this, but only when I have time
 class HyperNetwork(torch.nn.Module):
     def __init__(self, num_layers=5, layer_types=["q", "v"],
                  dims={"q": [10, 20], "v": [10, 20]},
@@ -76,10 +70,6 @@ class HyperNetwork(torch.nn.Module):
         self.dims = dims
         # d_out per type (rows of the adapted weight matrix = dims[k][0])
         self.d_out = {k: dims[k][0] for k in layer_types}
-        self.action_dim = (
-            num_layers * sum(self.d_out[k] for k in layer_types) # b
-            + num_layers * self.num_types * rank # d
-        )
 
         # Precomputed layer and type batches
         layer_indices = torch.arange(self.num_layers)
@@ -142,47 +132,6 @@ class HyperNetwork(torch.nn.Module):
             torch.nn.init.zeros_(head.bias)
             self.b_head_mean[k] = head
 
-        # Raw log_std params; 0.0 maps to log_std = -2.0.
-        self.log_std_raw_d = torch.nn.Parameter(
-            torch.zeros(self.num_layers * self.num_types, rank)
-        )
-        self.log_std_raw_b = torch.nn.ParameterDict(
-            {
-                k: torch.nn.Parameter(torch.zeros(num_layers, self.d_out[k]))
-                for k in layer_types
-            }
-        )
-
-        # VALUE HEAD
-        self.value_head = torch.nn.Sequential(
-            torch.nn.Linear(profile_dim, 64),
-            torch.nn.Tanh(),
-            torch.nn.Linear(64, 64),
-            torch.nn.Tanh(),
-            torch.nn.Linear(64, 1)
-        )
-
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _soft_bound(raw):
-        """Smooth map R -> [LOG_STD_MIN, LOG_STD_MAX]; raw=0 -> midpoint."""
-        mid = 0.5 * (LOG_STD_MAX + LOG_STD_MIN)
-        half = 0.5 * (LOG_STD_MAX - LOG_STD_MIN)
-        return mid + half * torch.tanh(raw)
-
-    def _log_std_d(self):
-        return self._soft_bound(self.log_std_raw_d)
-
-    def _log_std_b(self, k):
-        return self._soft_bound(self.log_std_raw_b[k])
-
-    def log_std_mean(self):
-        """Scalar diagnostic: mean log_std over all action dims."""
-        parts = [self._log_std_d().flatten()]
-        parts += [self._log_std_b(k).flatten() for k in self.layer_types]
-        return torch.cat(parts).mean()
-
     def _trunk(self, x):
         batch_size = x.shape[0]
         x = x.unsqueeze(1).expand(-1, self.num_layers * self.num_types, -1)
@@ -215,57 +164,9 @@ class HyperNetwork(torch.nn.Module):
             b_mean[k] = self.b_head_mean[k](h_k) # (B, L, d_out[k])
         return d_mean, b_mean
 
-    def _dists(self, x):
-        d_mean, b_mean = self.forward(x)
-        B_ = x.shape[0]
-        dist_d = Independent(
-            Normal(d_mean,
-                   self._log_std_d().exp().unsqueeze(0).expand(B_, -1, -1)), 2)
-        dist_b = {
-            k: Independent(
-                Normal(b_mean[k],
-                       self._log_std_b(k).exp().unsqueeze(0).expand(B_, -1, -1)), 2)
-            for k in self.layer_types
-        }
-        return dist_d, dist_b
-
-    def get_action_and_logprob(self, x, action=None, use_action=False,
-                               deterministic=False):
-        """
-        Action format: (b, d) with
-            b : dict k -> (B, num_layers, d_out[k])
-            d : (B, num_layers*num_types, rank)
-        """
-        dist_d, dist_b = self._dists(x)
-
-        if use_action:
-            b, d = action
-            log_prob = dist_d.log_prob(d)
-            entropy = dist_d.entropy().mean()
-            for k in self.layer_types:
-                log_prob = log_prob + dist_b[k].log_prob(b[k])
-                entropy = entropy + dist_b[k].entropy().mean()
-            return log_prob, entropy
-
-        if deterministic:
-            d = dist_d.base_dist.loc
-            b = {k: dist_b[k].base_dist.loc for k in self.layer_types}
-        else: #old branch, not used
-            d = dist_d.rsample()
-            b = {k: dist_b[k].rsample() for k in self.layer_types}
-
-        log_prob = dist_d.log_prob(d)
-        for k in self.layer_types:
-            log_prob = log_prob + dist_b[k].log_prob(b[k])
-
-        return (b, d), log_prob, self.A, self.B
-
     def act(self, x):
         """Deterministic actions (b, d) for the gradient-based trainers.
         Differentiable when called with grad enabled — used for the VJP
         surrogate on the head node."""
         d_mean, b_mean = self.forward(x)
         return b_mean, d_mean
-
-    def get_value(self, x):
-        return self.value_head(x)
