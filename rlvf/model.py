@@ -155,6 +155,8 @@ class HyperNetwork(torch.nn.Module):
         d_mean : (B, L*T, rank)
         b_mean : dict k -> (B, L, d_out[k])
         """
+
+        x = x / 0.8
         h = self._trunk(x)
         d_mean = self.d_head_mean(h) # (B, L*T, rank)
         b_mean = {}
