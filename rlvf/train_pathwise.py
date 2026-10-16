@@ -18,7 +18,7 @@ EPISODES_PER_WORKER = args.episodes_per_worker
 # ── Config ────────────────────────────────────────────────────────────────────
 DEVICE          = "cuda:0"
 LUSTRE          = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf"
-CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_pathwise_v3_dolly"
+CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_pathwise_v4"
 
 NUM_LAYERS      = 32
 LAYER_TYPES     = ["q", "v"]
@@ -82,7 +82,7 @@ def load_checkpoint(path: str) -> int:
     result = policy.load_state_dict(ckpt["model"], strict=False)
     print(result.missing_keys)
     print(result.unexpected_keys)
-    #optimizer.load_state_dict(ckpt["optimizer"], strict=False)
+    optimizer.load_state_dict(ckpt["optimizer"], strict=False)
     print(f"[train] Resumed from {path} (step {ckpt['step']})")
     return ckpt["step"]
 

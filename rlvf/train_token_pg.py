@@ -97,7 +97,7 @@ print(ckpts)
 if ckpts:
     ckpt = torch.load(str(ckpts[-1]), map_location=DEVICE)
     policy.load_state_dict(ckpt["model"], strict=False)
-    #optimizer.load_state_dict(ckpt["optimizer"])
+    optimizer.load_state_dict(ckpt["optimizer"])
     start_step = ckpt["step"]
     print(f"[train] Resumed from {ckpts[-1]} (step {start_step})")
 
