@@ -67,11 +67,14 @@ class RLVFEnv(BaseEnv):
         self.train_means = train_means
         self.eval_means = eval_means
         self.train_sampler = ValueProfileSampler(rng=rng_seed, means=train_means)
-        eval_sampler       = ValueProfileSampler(rng=rng_seed + 1, means=eval_means)
+        eval_sampler = ValueProfileSampler(rng=rng_seed + 1, means=eval_means)
+        eval_sampler_zero_mean = ValueProfileSampler(rng=rng_seed + 1)
 
         # Fixed eval profiles
-        eval_np            = eval_sampler.sample_batch(eval_size)
+        eval_np = eval_sampler.sample_batch(eval_size)
         self.eval_profiles = torch.tensor(eval_np, dtype=torch.float32)
+        eval_np_zero_mean = eval_sampler_zero_mean.sample_batch(eval_size)
+        self.eval_profiles_zero_mean = torch.tensor(eval_np_zero_mean, dtype=torch.float32)
         print(f"[RLVFEnv] Profile sampler: train means={train_means or 'zero'}, "
               f"eval means={eval_means or 'zero'} ({eval_size} fixed eval profiles)")
 

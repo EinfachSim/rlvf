@@ -186,7 +186,16 @@ try:
                 eval_b, eval_d = policy.act(eval_states)
             eval_metrics = env.eval_batch(
                 action_batch=({k: v.cpu() for k, v in eval_b.items()},
-                              eval_d.cpu()),
+                                eval_d.cpu()),
+                A=A, B=B,
+            )
+            #zero mean evals 
+            eval_states_zero_mean = env.eval_profiles_zero_mean.to(DEVICE)
+            with torch.no_grad():
+                eval_b, eval_d = policy.act(eval_states_zero_mean)
+            eval_metrics_zero_mean = env.eval_batch(
+                action_batch=({k: v.cpu() for k, v in eval_b.items()},
+                                eval_d.cpu()),
                 A=A, B=B,
             )
             wandb.log({
@@ -196,11 +205,19 @@ try:
                 "eval/score_disc_mean": eval_metrics["eval_score_disc_mean"],
                 "eval/kl_mean":     eval_metrics["eval_kl_mean"],
                 "eval/digit_mass":  eval_metrics["eval_digit_mass"],
+                
+                "eval_zero_mean/reward_mean": eval_metrics_zero_mean["eval_reward_mean"],
+                "eval_zero_mean/reward_std":  eval_metrics_zero_mean["eval_reward_std"],
+                "eval_zero_mean/score_mean":  eval_metrics_zero_mean["eval_score_mean"],
+                "eval_zero_mean/score_disc_mean": eval_metrics_zero_mean["eval_score_disc_mean"],
+                "eval_zero_mean/kl_mean":     eval_metrics_zero_mean["eval_kl_mean"],
+                "eval_zero_mean/digit_mass":  eval_metrics_zero_mean["eval_digit_mass"],
             }, step=step)
             print(f"[eval]  step {step:04d} | "
-                  f"reward: {eval_metrics['eval_reward_mean']:+.4f} ± "
-                  f"{eval_metrics['eval_reward_std']:.4f} | "
-                  f"score: {eval_metrics['eval_score_mean']:+.4f}")
+                    f"reward: {eval_metrics['eval_reward_mean']:+.4f} ± "
+                    f"{eval_metrics['eval_reward_std']:.4f} | "
+                    f"score: {eval_metrics['eval_score_mean']:+.4f} | "
+                    f"kl: {eval_metrics['eval_kl_mean']:.4f}")
 
         if step % SAVE_EVERY == 0 and step > 0:
             save_checkpoint(step)
