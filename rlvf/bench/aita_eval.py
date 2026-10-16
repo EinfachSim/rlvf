@@ -166,6 +166,9 @@ def main():
     ap.add_argument("--posts_per_side", type=int, default=10,
                     help="per value: this many posts where high-value says YTA, and as many where it says NTA")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--eval_means", choices=["empirical", "zero"], default="empirical",
+                    help="profile prior for the eval set: 'empirical' = population means "
+                         "(Schwartz & Cieciuch 2022, Table 5), 'zero' = uniform coverage")
     ap.add_argument("--random_b_scale", type=float, default=1.0)
     ap.add_argument("--random_d_scale", type=float, default=0.1)
     ap.add_argument("--random_d_mean", type=float, default=0.0)
@@ -185,7 +188,8 @@ def main():
 
     ray.init()
     common = dict(worker_types=args.conditions, eval_size=args.eval_size,
-                  rng_seed=args.seed)
+                  rng_seed=args.seed,
+                  eval_means=None if args.eval_means == "zero" else "empirical")
     if args.benchmark == "aita":
         env = AITAEnv(dataset_path=args.dataset,
                       posts_per_side=args.posts_per_side, **common)

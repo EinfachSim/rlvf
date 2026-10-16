@@ -34,6 +34,8 @@ class RLVFEnv(BaseEnv):
         layer_types: int = 2,
         rank: int = 8,
         verbose: bool = False,
+        train_means=None,          # None -> zero-mean (uniform coverage of profile space)
+        eval_means="empirical",    # "empirical" -> population prior (Schwartz & Cieciuch 2022, Table 5)
     ):
         self.num_workers = num_workers
         self.episodes_per_worker = episodes_per_worker
@@ -56,14 +58,22 @@ class RLVFEnv(BaseEnv):
         self.last_errors = 0
 
         # ── Samplers ──────────────────────────────────────────────────────────
-        # Separate RNGs so eval set is always reproducible regardless of
-        # how many training batches have been drawn
-        self.train_sampler = ValueProfileSampler(rng=rng_seed)
-        eval_sampler       = ValueProfileSampler(rng=rng_seed + 1)
+        # Training: zero-mean profiles so no value is privileged a priori and
+        # the HN is trained for coverage of the whole admissible profile space.
+        # Eval: population prior (empirical per-value means), i.e. profiles
+        # of realistic people. Both share the empirical correlation structure.
+        # Separate RNGs so the eval set is reproducible regardless of how many
+        # training batches have been drawn.
+        self.train_means = train_means
+        self.eval_means = eval_means
+        self.train_sampler = ValueProfileSampler(rng=rng_seed, means=train_means)
+        eval_sampler       = ValueProfileSampler(rng=rng_seed + 1, means=eval_means)
 
         # Fixed eval profiles
         eval_np            = eval_sampler.sample_batch(eval_size)
         self.eval_profiles = torch.tensor(eval_np, dtype=torch.float32)
+        print(f"[RLVFEnv] Profile sampler: train means={train_means or 'zero'}, "
+              f"eval means={eval_means or 'zero'} ({eval_size} fixed eval profiles)")
 
         # ── Ray workers ───────────────────────────────────────────────────────
         print(f"[RLVFEnv] Spawning {num_workers} workers "

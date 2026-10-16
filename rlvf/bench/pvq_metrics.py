@@ -16,6 +16,17 @@ Per episode (one profile in one condition):
 Per condition, additionally per value:
   r_value  = correlation ACROSS the profiles between conditioned and answered
              score on that value (same idea as the AITA table).
+
+Reference baselines (no conditioning on the profile):
+  flat_mse = MSE of answering a perfectly flat profile (all 19 values equal).
+  mean_mse = MSE of answering the eval set's own mean profile for every
+             profile. With a population-prior eval set (empirical per-value
+             means) this is the baseline to beat: it is what "answer like the
+             average person" scores, and the base model is close to it.
+             A condition whose MSE is not below mean_mse, or whose r_value is
+             ~0, is not using the profile.
+  Note: r_prof is inflated by the shared mean under a population prior (every
+  profile correlates with the mean profile); r_value is the clean metric.
 """
 import math
 
@@ -86,6 +97,7 @@ def pvq_table(results: list[dict]) -> dict:
     out = {}
     for wt, rs in by.items():
         sc = [episode_scores(r) for r in rs]
+        mean_prof = [sum(r["profile"][i] for r in rs) / len(rs) for i in range(19)]
         mses = [s["mse"] for s in sc]
         m = sum(mses) / len(mses)
         rs_ok = [s["r"] for s in sc if s["r"] == s["r"]]
@@ -102,6 +114,9 @@ def pvq_table(results: list[dict]) -> dict:
             "digit_mass": sum(s["digit_mass"] for s in sc) / len(sc),
             # reference: answering a perfectly flat profile (all values equal)
             "flat_mse": sum(mse([0.0] * 19, r["profile"]) for r in rs) / len(rs),
+            # reference: answering the eval set's mean profile for everyone
+            # (no conditioning). The floor to beat under a population prior.
+            "mean_mse": sum(mse(mean_prof, r["profile"]) for r in rs) / len(rs),
         }
         out[wt]["per_value"] = per_value
         rv = [v["r"] for v in per_value.values() if v["r"] == v["r"]]
@@ -110,9 +125,12 @@ def pvq_table(results: list[dict]) -> dict:
 
 
 def print_pvq_table(summary: dict):
-    flat = next(iter(summary.values()))["flat_mse"] if summary else float("nan")
-    print("\n[PVQ-RR] conditioned vs. answered value profile "
-          f"(lower MSE = better; flat-profile reference MSE = {flat:.3f})")
+    first = next(iter(summary.values())) if summary else {}
+    flat = first.get("flat_mse", float("nan"))
+    meanm = first.get("mean_mse", float("nan"))
+    print("\n[PVQ-RR] conditioned vs. answered value profile (lower MSE = better)")
+    print(f"  reference MSE, no conditioning: mean-profile = {meanm:.3f} "
+          f"(floor to beat), flat-profile = {flat:.3f}")
     print(f"{'condition':12s} {'MSE':>7s} {'±sd':>6s} {'MSE_disc':>9s} "
           f"{'r_prof':>7s} {'r_value':>8s} {'digit_mass':>11s}")
     for wt, s in sorted(summary.items(), key=lambda kv: kv[1]["mse"]):

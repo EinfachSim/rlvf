@@ -112,7 +112,7 @@ class ValueProfileSampler:
 
     value_names = VALUE_NAMES
 
-    def __init__(self, corr=None, means="empirical", sds=None, rng=None, **_ignored):
+    def __init__(self, corr=None, means=None, sds=None, rng=None, **_ignored):
         self.n_values = len(VALUE_NAMES)
         self.rng = np.random.default_rng(rng)
         self.corr = _nearest_corr(EMPIRICAL_CORR if corr is None else np.asarray(corr))

@@ -24,6 +24,7 @@ class BaseEnv(ABC):
         num_layers: int = 32,
         layer_types: int = 2,
         rank: int = 8,
+        eval_means="empirical",   # population prior by default; None -> zero-mean
     ):
         self.num_layers = num_layers
         self.layer_types = layer_types
@@ -34,9 +35,11 @@ class BaseEnv(ABC):
         self.last_eval = None
         self.last_errors = 0
 
-        eval_sampler = ValueProfileSampler(rng=rng_seed)
+        self.eval_means = eval_means
+        eval_sampler = ValueProfileSampler(rng=rng_seed, means=eval_means)
         eval_np = eval_sampler.sample_batch(eval_size)
         self.eval_profiles = torch.tensor(eval_np, dtype=torch.float32)
+        print(f"[BenchEnv] {eval_size} eval profiles, means={eval_means or 'zero'}")
 
         # ── Ray workers ───────────────────────────────────────────────────────
         # Kept as a plain list, NOT an ActorPool: the pool is heterogeneous

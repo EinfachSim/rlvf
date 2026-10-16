@@ -80,6 +80,8 @@ env = RLVFEnv(
     num_workers=NUM_WORKERS, episodes_per_worker=EPISODES_PER_WORKER,
     kl_weight=KL_WEIGHT, batch_size=BATCH_SIZE,
     layer_types=len(LAYER_TYPES), rank=RANK, num_layers=NUM_LAYERS,
+    train_means=None,          # zero-mean: uniform coverage of the profile space
+    eval_means="empirical",    # population prior (Schwartz & Cieciuch 2022, Table 5)
 )
 print(f"Batch size: {env.batch_size}")
 
