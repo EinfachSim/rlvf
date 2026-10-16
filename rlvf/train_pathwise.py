@@ -82,7 +82,7 @@ def load_checkpoint(path: str) -> int:
     result = policy.load_state_dict(ckpt["model"], strict=False)
     print(result.missing_keys)
     print(result.unexpected_keys)
-    optimizer.load_state_dict(ckpt["optimizer"])
+    #optimizer.load_state_dict(ckpt["optimizer"], strict=False)
     print(f"[train] Resumed from {path} (step {ckpt['step']})")
     return ckpt["step"]
 
