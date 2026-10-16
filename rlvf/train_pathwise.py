@@ -26,7 +26,7 @@ DIMS            = {"q": [4096, 4096], "v": [1024, 4096]}
 PROFILE_DIM     = 19
 RANK            = 8
 
-LR              = 1e-4
+LR              = 3e-4
 GRAD_CLIP       = 1.0
 BATCH_SIZE      = 64
 KL_WEIGHT       = 0.1
