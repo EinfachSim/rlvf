@@ -117,6 +117,7 @@ class RLVFEnv(BaseEnv):
     def eval_batch(
         self,
         action_batch: torch.Tensor,
+        profiles=None
     ) -> dict:
         """
         Run a batch of episodes on the fixed eval profiles.
@@ -125,8 +126,11 @@ class RLVFEnv(BaseEnv):
         assert action_batch[1].shape[0] == len(self.eval_profiles), \
             f"eval action_batch must have {len(self.eval_profiles)} rows"
 
+        if profiles == "zero_mean":
+            eval_profiles = self.eval_profiles_zero_mean
+        else: eval_profiles = self.eval_profiles
         rewards = self._run_pool(
-            action_batch, self.eval_profiles, tag="EVAL"
+            action_batch, eval_profiles, tag="EVAL"
         )
         return {
             "eval_reward_mean": rewards.mean().item(),

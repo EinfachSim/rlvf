@@ -689,3 +689,25 @@ class EnvWorker:
 
     def run_episodes_grad_serial(self, episodes: list[dict]) -> list[dict]:
         return [self.run_episode_grad(**ep) for ep in episodes]
+
+
+    #diagnostic for collapse:
+
+    def answers(self, b_np, d_np, A_np, B_np) -> dict:
+        """Per-item answer diagnostics for one adapter (no reward, no grad)."""
+        b = {k: torch.tensor(v, device=self.device, dtype=torch.float32)
+             for k, v in b_np.items()}
+        d = torch.tensor(d_np, device=self.device, dtype=torch.float32)
+        A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
+        B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
+        try:
+            self._apply_vera(b, d, A, B)
+            answers, digit_mass, norm = self._answer_questionnaire()
+            return {
+                "expected": answers.cpu().numpy(),                 # (57,) E[k]
+                "argmax":   (norm.argmax(-1) + 1).cpu().numpy(),   # (57,) in 1..6
+                "pmax":     norm.max(-1).values.cpu().numpy(),     # (57,) max prob over digits
+                "digit_mass": digit_mass,
+            }
+        finally:
+            self._remove_adapter()

@@ -210,6 +210,7 @@ try:
             eval_metrics_zero_mean = env.eval_batch(
                 action_batch=({k: v.cpu() for k, v in eval_b.items()},
                                 eval_d.cpu()),
+                profiles="zero_mean"
             )
             wandb.log({
                 "eval/reward_mean": eval_metrics["eval_reward_mean"],
