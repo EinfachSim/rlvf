@@ -26,6 +26,11 @@ DOMAIN_KL_IN_LOSS = True   # include KL_domain gradient in token_pg mode too,
 FAILURE_SCORE  = -10.0
 MIN_DIGIT_MASS = 0.05
 
+# Entropy floor on the renormalized 6-digit answer distribution (pathwise).
+# Keeps pi_i away from one-hot so that d a_hat / d z_k = pi_k (k - a_hat)
+# does not vanish. H_MIN in nats; the maximum is ln(6) ~= 1.79.
+H_MIN_DEFAULT = 0.5
+
 VALUE_NAMES = [
     "Self-direction Thought", "Self-direction Action", "Stimulation",
     "Hedonism", "Achievement", "Power Dominance", "Power Resources",
@@ -60,8 +65,29 @@ SCORING_KEY = {
 
 @ray.remote(num_gpus=1, num_cpus=8)
 class EnvWorker:
-    def __init__(self, A, B):
+    def __init__(self, A_np: dict, B_np: dict):
+        """
+        A_np / B_np: the frozen VeRA matrices as numpy arrays,
+            {"q": (L, rank, d_in), "v": ...} and {"q": (L, d_out, rank), "v": ...}.
+        Shipped once at construction and cached on the GPU in fp32; episodes
+        only carry the per-adapter (b, d).
+        """
         self.device = "cuda:0"
+
+        self.A = {k: torch.tensor(v, device=self.device, dtype=torch.float32)
+                  for k, v in A_np.items()}
+        self.B = {k: torch.tensor(v, device=self.device, dtype=torch.float32)
+                  for k, v in B_np.items()}
+        self._A_cpu = {k: v.cpu() for k, v in self.A.items()}
+        self._B_cpu = {k: v.cpu() for k, v in self.B.items()}
+        for t in LAYER_TYPES:
+            assert self.A[t].shape[0] == len(TARGET_LAYERS) and \
+                   self.A[t].shape[1] == RANK, f"A[{t}] has shape {tuple(self.A[t].shape)}"
+            assert self.B[t].shape[0] == len(TARGET_LAYERS) and \
+                   self.B[t].shape[2] == RANK, f"B[{t}] has shape {tuple(self.B[t].shape)}"
+        print(f"[EnvWorker] Cached frozen VeRA A/B: "
+              + ", ".join(f"A[{t}]={tuple(self.A[t].shape)} B[{t}]={tuple(self.B[t].shape)}"
+                          for t in LAYER_TYPES))
 
         print(f"[EnvWorker] Waiting for model load lock...")
         with open(LOCK_PATH, "w") as lock_file:
@@ -164,16 +190,17 @@ class EnvWorker:
 
     # ── Adapter application (forward hooks, fp32) ─────────────────────────────
 
-    def _apply_vera(self, b, d, A, B):
-        """h = W0 x + Λ_b·B·Λ_d·A·x. Differentiable wrt the given b, d."""
+    def _apply_vera(self, b, d):
+        """h = W0 x + Λ_b·B·Λ_d·A·x with the cached frozen A, B.
+        Differentiable wrt the given b, d."""
         assert not self._hooks, "adapter hooks already active"
         for li, layer_idx in enumerate(TARGET_LAYERS):
             attn = self.model.model.layers[layer_idx].self_attn
             for ti, t in enumerate(LAYER_TYPES):
                 d_lt = d[li, ti] # (rank,)
                 b_lt = b[t][li] # (d_out,)
-                A_lt = A[t][li].to(self.device, torch.float32) # (rank, d_in)
-                B_lt = B[t][li].to(self.device, torch.float32) # (d_out, rank)
+                A_lt = self.A[t][li] # (rank, d_in), fp32 on device
+                B_lt = self.B[t][li] # (d_out, rank), fp32 on device
                 proj = attn.q_proj if t == "q" else attn.v_proj
 
                 def hook(module, inputs, output,
@@ -189,13 +216,14 @@ class EnvWorker:
             h.remove()
         self._hooks = []
 
-    @staticmethod
-    def _delta_w_frobenius(b, d, A, B) -> float:
+    def _delta_w_frobenius(self, b, d) -> float:
+        """Sum over the 64 adapted matrices of ||ΔW||_F, computed in the
+        r x r Gram space. b, d on CPU."""
         total = 0.0
         for ti, t in enumerate(LAYER_TYPES):
             for li in range(len(TARGET_LAYERS)):
-                A_lt = A[t][li].to(torch.float32)
-                B_lt = B[t][li].to(torch.float32)
+                A_lt = self._A_cpu[t][li]
+                B_lt = self._B_cpu[t][li]
                 d_lt = d[li, ti].to(torch.float32)
                 b_lt = b[t][li].to(torch.float32)
                 GA = A_lt @ A_lt.T
@@ -324,6 +352,22 @@ class EnvWorker:
         answers = (norm * self._ks).sum(dim=-1)
         return answers, mass, norm
 
+    @staticmethod
+    def _digit_entropy(norm):
+        """Entropy (nats) of the renormalized 6-digit distribution, per item.
+        norm (n, 6) -> (n,). Differentiable."""
+        logp = torch.log(norm.clamp_min(1e-12))
+        return -(norm * logp).sum(dim=-1)
+
+    def _digit_stats(self, norm) -> dict:
+        """Logging-only summary of how peaked the answer distributions are."""
+        with torch.no_grad():
+            H = self._digit_entropy(norm)
+            return {
+                "entropy": float(H.mean().item()),
+                "pmax": float(norm.max(dim=-1).values.mean().item()),
+            }
+
     def _score_torch(self, answers, profile_t):
         """Differentiable port of the numpy scoring. answers (57,), profile (19,)."""
         dim_means = answers[self._scoring_idx].mean(dim=1) # (19,)
@@ -358,23 +402,40 @@ class EnvWorker:
                 f"(< {MIN_DIGIT_MASS}), adapter broke the model")
         return answers, digit_mass, norm
 
+    def answers(self, b_np, d_np) -> dict:
+        """Per-item answer diagnostics for one adapter (no reward, no grad).
+        Used by diag_profile_sensitivity.py."""
+        b = {k: torch.tensor(v, device=self.device, dtype=torch.float32)
+             for k, v in b_np.items()}
+        d = torch.tensor(d_np, device=self.device, dtype=torch.float32)
+        try:
+            self._apply_vera(b, d)
+            answers, digit_mass, norm = self._answer_questionnaire()
+            return {
+                "expected":   answers.cpu().numpy(),                # (57,) E[k]
+                "argmax":     (norm.argmax(-1) + 1).cpu().numpy(),  # (57,) in 1..6
+                "pmax":       norm.max(-1).values.cpu().numpy(),    # (57,)
+                "entropy":    self._digit_entropy(norm).cpu().numpy(),
+                "digit_mass": digit_mass,
+            }
+        finally:
+            self._remove_adapter()
+
     # ── Reward-only episode (PPO baseline / eval) ─────────────────────────────
 
-    def run_episode(self, adapter_id, profile, b_np, d_np, A_np, B_np,
+    def run_episode(self, adapter_id, profile, b_np, d_np,
                     kl_weight: float = 0.1) -> dict:
         import time
         b = {k: torch.tensor(v, device=self.device, dtype=torch.float32)
              for k, v in b_np.items()}
         d = torch.tensor(d_np, device=self.device, dtype=torch.float32)
-        A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
-        B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
 
         kl = 0.0
         try:
             t0 = time.perf_counter()
-            self._apply_vera(b, d, A, B)
+            self._apply_vera(b, d)
             b_cpu = {k: v.cpu() for k, v in b.items()}
-            delta_fro = self._delta_w_frobenius(b_cpu, d.cpu(), A, B)
+            delta_fro = self._delta_w_frobenius(b_cpu, d.cpu())
 
             adapted_logits, attention_mask = self._get_adapted_logits()
             kl = self._compute_kl(adapted_logits, attention_mask)
@@ -386,17 +447,20 @@ class EnvWorker:
             # discrete-argmax score for logging
             disc = (norm.argmax(dim=-1).float() + 1.0)
             score_disc = float(self._score_torch(disc, profile_t).item())
+            dstats = self._digit_stats(norm)
 
             reward = score - kl_weight * kl
             t1 = time.perf_counter()
             print(f"[Diag Episode End] score={score:.4f}, "
                   f"score_disc={score_disc:.4f}, kl={kl:.4f}, "
                   f"reward={reward:.4f}, digit_mass={digit_mass:.4f}, "
+                  f"H={dstats['entropy']:.3f}, pmax={dstats['pmax']:.3f}, "
                   f"dW_fro={delta_fro:.4f}, t={t1-t0:.2f}s")
             return {
                 "adapter_id": adapter_id, "kl": kl, "score": score,
                 "score_disc": score_disc, "reward": reward,
                 "digit_mass": digit_mass, "delta_w_frobenius": delta_fro,
+                "entropy": dstats["entropy"], "pmax": dstats["pmax"],
                 "d_abs_mean": float(d.abs().mean().item()),
                 "b_abs_mean": float(torch.cat(
                     [v.flatten() for v in b.values()]).abs().mean().item()),
@@ -414,6 +478,7 @@ class EnvWorker:
                 "adapter_id": adapter_id, "kl": kl, "score": FAILURE_SCORE,
                 "score_disc": FAILURE_SCORE, "reward": reward,
                 "digit_mass": 0.0, "delta_w_frobenius": float("nan"),
+                "entropy": float("nan"), "pmax": float("nan"),
                 "d_abs_mean": float(d.abs().mean().item()),
                 "b_abs_mean": float(torch.cat(
                     [v.flatten() for v in b.values()]).abs().mean().item()),
@@ -432,17 +497,25 @@ class EnvWorker:
         gd = np.zeros(d.shape, dtype=np.float32)
         return gb, gd
 
-    def run_episode_grad(self, adapter_id, profile, b_np, d_np, A_np, B_np,
+    def run_episode_grad(self, adapter_id, profile, b_np, d_np,
                          mode: str = "pathwise",
                          kl_weight: float = 0.1,
                          tok_kl_weight: float = 0.05,
                          ent_coef: float = 0.0,
                          temperature: float = 1.0,
                          mass_coef: float = 0.1,
+                         ent_floor_coef: float = 0.0,
+                         h_min: float = H_MIN_DEFAULT,
                          seed: int = None) -> dict:
         """
         Returns loss gradients wrt (b, d), i.e. the head node minimizes the
         surrogate sum((b, grad_b)) + sum((d, grad_d)).
+
+        ent_floor_coef / h_min (pathwise only): entropy-floor regularizer
+            L_ent = (1/57) * sum_i max(0, h_min - H(pi_i))
+        on the renormalized 6-digit distributions. Prevents pi_i from
+        saturating to one-hot, where the expected-value surrogate has zero
+        gradient (d a_hat / d z_k = pi_k (k - a_hat) = 0 for one-hot pi).
         """
         import time
         assert mode in ("pathwise", "token_pg")
@@ -450,15 +523,13 @@ class EnvWorker:
                              requires_grad=True) for k, v in b_np.items()}
         d = torch.tensor(d_np, device=self.device, dtype=torch.float32,
                          requires_grad=True)
-        A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
-        B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
         profile_t = torch.tensor(profile, device=self.device,
                                  dtype=torch.float32)
         n_items = self._quest_inputs["input_ids"].shape[0]
 
         try:
             t0 = time.perf_counter()
-            self._apply_vera(b, d, A, B)
+            self._apply_vera(b, d)
             info = {}
 
             # PASS 1 (no grad): answer distributions for all items
@@ -475,14 +546,24 @@ class EnvWorker:
                 # The score renormalizes by digit mass, making it invariant to
                 # mass, which is why mass penalty is needed
                 mass_pen_total = 0.0
+                ent_pen_total = 0.0
                 for lo in range(0, n_items, QUEST_CHUNK):
                     rows = slice(lo, min(lo + QUEST_CHUNK, n_items))
-                    a_chunk, m_chunk, _ = self._digits_from_logits(self._quest_logits_chunk(rows))
+                    a_chunk, m_chunk, p_chunk = self._digits_from_logits(
+                        self._quest_logits_chunk(rows))
                     mass_pen = -torch.log(m_chunk.clamp_min(1e-6)).sum() / n_items
+                    # Entropy floor: only active for items whose digit
+                    # distribution is sharper than h_min.
+                    H_chunk = self._digit_entropy(p_chunk)              # (n,)
+                    ent_pen = F.relu(h_min - H_chunk).sum() / n_items
                     ((a_chunk * g_ans[rows]).sum()
-                     + mass_coef * mass_pen).backward()
+                     + mass_coef * mass_pen
+                     + ent_floor_coef * ent_pen).backward()
                     mass_pen_total += float(mass_pen.item())
+                    ent_pen_total += float(ent_pen.item())
                 info["mass_penalty"] = mass_pen_total
+                info["ent_penalty"] = ent_pen_total
+                info.update(self._digit_stats(norm))
                 kl = self._domain_kl_with_grad(kl_weight) if kl_weight > 0 \
                     else self._compute_kl(*self._get_adapted_logits())
                 reward = score - kl_weight * kl
@@ -550,6 +631,7 @@ class EnvWorker:
                 kl_tok = kl_tok_total / n_items
                 info["kl_token"] = kl_tok
                 info["entropy"] = ent_total / n_items
+                info["pmax"] = float(norm.max(dim=-1).values.mean().item())
                 if DOMAIN_KL_IN_LOSS and kl_weight > 0:
                     kl = self._domain_kl_with_grad(kl_weight)
                 else:
@@ -571,8 +653,10 @@ class EnvWorker:
             t1 = time.perf_counter()
             print(f"[Grad Episode ep={adapter_id} mode={mode}] "
                   f"score={score:.4f} kl={kl:.4f} reward={reward:.4f} "
-                  f"digit_mass={digit_mass:.4f} g_norm={gnorm:.4f} "
-                  f"t={t1-t0:.2f}s")
+                  f"digit_mass={digit_mass:.4f} "
+                  f"H={info.get('entropy', float('nan')):.3f} "
+                  f"pmax={info.get('pmax', float('nan')):.3f} "
+                  f"g_norm={gnorm:.4f} t={t1-t0:.2f}s")
             return {
                 "adapter_id": adapter_id, "mode": mode,
                 "reward": reward, "score": score, "kl": kl,

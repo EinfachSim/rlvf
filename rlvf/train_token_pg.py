@@ -72,7 +72,7 @@ if args.init_from:
     ckpt = torch.load(args.init_from, map_location=DEVICE)
     result = policy.load_state_dict(ckpt["model"], strict=False)
     print(result.missing_keys)
-    print(print(result.unexpected_keys))
+    print(result.unexpected_keys)
     print(f"[train] Warm-started from {args.init_from} (step {ckpt['step']})")
 
 Path(CHECKPOINT_DIR).mkdir(parents=True, exist_ok=True)
@@ -166,6 +166,7 @@ try:
             "train/entropy_mean":  ent_mean,
             "train/adv_std_mean":  adv_sd_mean,
             "train/digit_mass":  float(env.last_digit_mass[ok].mean().item()),
+            "train/pmax":        float(env.last_pmax[ok].nanmean().item()),
             "train/errors":      env.last_errors,
             "train/env_grad_norm_mean": res["env_grad_norms"][ok].mean().item(),
             "train/hn_grad_norm": grad_norm.item(),
@@ -204,19 +205,26 @@ try:
                 "eval/score_disc_mean": eval_metrics["eval_score_disc_mean"],
                 "eval/kl_mean":     eval_metrics["eval_kl_mean"],
                 "eval/digit_mass":  eval_metrics["eval_digit_mass"],
-                
+                "eval/entropy":     eval_metrics["eval_entropy"],
+                "eval/pmax":        eval_metrics["eval_pmax"],
+
                 "eval_zero_mean/reward_mean": eval_metrics_zero_mean["eval_reward_mean"],
                 "eval_zero_mean/reward_std":  eval_metrics_zero_mean["eval_reward_std"],
                 "eval_zero_mean/score_mean":  eval_metrics_zero_mean["eval_score_mean"],
                 "eval_zero_mean/score_disc_mean": eval_metrics_zero_mean["eval_score_disc_mean"],
                 "eval_zero_mean/kl_mean":     eval_metrics_zero_mean["eval_kl_mean"],
                 "eval_zero_mean/digit_mass":  eval_metrics_zero_mean["eval_digit_mass"],
+                "eval_zero_mean/entropy":     eval_metrics_zero_mean["eval_entropy"],
+                "eval_zero_mean/pmax":        eval_metrics_zero_mean["eval_pmax"],
             }, step=step)
             print(f"[eval]  step {step:04d} | "
                     f"reward: {eval_metrics['eval_reward_mean']:+.4f} ± "
                     f"{eval_metrics['eval_reward_std']:.4f} | "
-                    f"score: {eval_metrics['eval_score_mean']:+.4f} | "
-                    f"kl: {eval_metrics['eval_kl_mean']:.4f}")
+                    f"score: {eval_metrics['eval_score_mean']:+.4f} "
+                    f"(disc: {eval_metrics['eval_score_disc_mean']:+.4f}) | "
+                    f"kl: {eval_metrics['eval_kl_mean']:.4f} | "
+                    f"H: {eval_metrics['eval_entropy']:.3f} | "
+                    f"pmax: {eval_metrics['eval_pmax']:.3f}")
 
         if step % SAVE_EVERY == 0 and step > 0:
             save_checkpoint(step)

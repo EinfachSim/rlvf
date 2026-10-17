@@ -15,8 +15,6 @@ class BaseEnv(ABC):
         self,
         action_batch: torch.Tensor,
         states: torch.Tensor,
-        A: dict,
-        B: dict,
     ) -> torch.Tensor:
         ...
 
@@ -57,10 +55,16 @@ class RLVFEnv(BaseEnv):
         self.last_kls = None
         self.last_digit_mass = None
         self.last_delta_fro = None
+        self.last_entropy = None   # mean entropy (nats) of the 6-digit answer dists
+        self.last_pmax = None      # mean max-prob over the 6 digits (1.0 = one-hot)
         self.last_errors = 0
 
+        # Frozen VeRA matrices: kept here for reference, shipped to the
+        # workers ONCE (as numpy) at construction and cached there.
         self.A = A
         self.B = B
+        A_np = {k: v.detach().cpu().numpy() for k, v in A.items()}
+        B_np = {k: v.detach().cpu().numpy() for k, v in B.items()}
 
         # ── Samplers ──────────────────────────────────────────────────────────
         # Training: zero-mean profiles so no value is privileged a priori and
@@ -88,7 +92,7 @@ class RLVFEnv(BaseEnv):
               f"(batch_size={self.batch_size}, "
               f"Approx. {self.batch_size // num_workers} episodes/worker)...")
         self.pool = ActorPool([
-            EnvWorker.remote(A, B) for _ in range(num_workers)
+            EnvWorker.remote(A_np, B_np) for _ in range(num_workers)
         ])
         print("[RLVFEnv] All workers ready.")
 
@@ -108,13 +112,11 @@ class RLVFEnv(BaseEnv):
         Fan out batch to workers, collect rewards.
         Returns rewards: (batch_size,)
         """
-        return self._run_pool(action_batch, states, self.A, self.B)
+        return self._run_pool(action_batch, states)
 
     def eval_batch(
         self,
         action_batch: torch.Tensor,
-        A: dict,
-        B: dict,
     ) -> dict:
         """
         Run a batch of episodes on the fixed eval profiles.
@@ -124,7 +126,7 @@ class RLVFEnv(BaseEnv):
             f"eval action_batch must have {len(self.eval_profiles)} rows"
 
         rewards = self._run_pool(
-            action_batch, self.eval_profiles, A, B, tag="EVAL"
+            action_batch, self.eval_profiles, tag="EVAL"
         )
         return {
             "eval_reward_mean": rewards.mean().item(),
@@ -135,6 +137,8 @@ class RLVFEnv(BaseEnv):
             "eval_score_disc_mean": float(self.last_scores_disc.mean().item()),
             "eval_kl_mean":     float(self.last_kls.mean().item()),
             "eval_digit_mass":  float(self.last_digit_mass.mean().item()),
+            "eval_entropy":     float(self.last_entropy.nanmean().item()),
+            "eval_pmax":        float(self.last_pmax.nanmean().item()),
         }
 
     def step_batch_grad(
@@ -155,11 +159,8 @@ class RLVFEnv(BaseEnv):
         d_batch = d_flat.reshape(
             n, self.num_layers, self.layer_types, self.rank)
 
-        A_np = {k: v.detach().cpu().numpy() for k, v in self.A.items()}
-        B_np = {k: v.detach().cpu().numpy() for k, v in self.B.items()}
-
         gk = dict(grad_kwargs or {})
-        payloads = self._build_payloads(b_batch, d_batch, states, A_np, B_np, n)
+        payloads = self._build_payloads(b_batch, d_batch, states, n)
         for chunk in payloads:
             for ep in chunk:
                 ep["mode"] = mode
@@ -192,6 +193,12 @@ class RLVFEnv(BaseEnv):
         self.last_digit_mass = torch.tensor(
             [r.get("digit_mass", float("nan")) for r in results],
             dtype=torch.float32)
+        self.last_entropy = torch.tensor(
+            [r.get("entropy", float("nan")) for r in results],
+            dtype=torch.float32)
+        self.last_pmax = torch.tensor(
+            [r.get("pmax", float("nan")) for r in results],
+            dtype=torch.float32)
         self.last_errors = int((~ok).sum().item())
 
         self._log(results, f"GRAD:{mode}")
@@ -209,8 +216,6 @@ class RLVFEnv(BaseEnv):
         self,
         action_batch,
         states: torch.Tensor,
-        A: dict,
-        B: dict,
         tag: str = "TRAIN",
     ) -> torch.Tensor:
         b_batch, d_flat = action_batch
@@ -220,10 +225,7 @@ class RLVFEnv(BaseEnv):
             n, self.num_layers, self.layer_types, self.rank
         )
 
-        A_np = {k: v.detach().cpu().numpy() for k, v in A.items()}
-        B_np = {k: v.detach().cpu().numpy() for k, v in B.items()}
-
-        payloads = self._build_payloads(b_batch, d_batch, states, A_np, B_np, n)
+        payloads = self._build_payloads(b_batch, d_batch, states, n)
 
         if self.verbose:
             for i, p in enumerate(payloads):
@@ -255,6 +257,12 @@ class RLVFEnv(BaseEnv):
         self.last_delta_fro = torch.tensor(
             [r.get("delta_w_frobenius", float("nan")) for r in results],
             dtype=torch.float32)
+        self.last_entropy = torch.tensor(
+            [r.get("entropy", float("nan")) for r in results],
+            dtype=torch.float32)
+        self.last_pmax = torch.tensor(
+            [r.get("pmax", float("nan")) for r in results],
+            dtype=torch.float32)
         self.last_errors = sum(1 for r in results if "error" in r)
 
         self._log(results, tag)
@@ -265,10 +273,9 @@ class RLVFEnv(BaseEnv):
         b_batch,
         d_batch,
         states,
-        A_np: dict,
-        B_np: dict,
         n: int,
     ) -> list[list[dict]]:
+        # A/B are NOT shipped per episode: the workers cached them at init.
         # Distribute n episodes as evenly as possible across workers
         base  = n // self.num_workers
         extra = n % self.num_workers 
@@ -285,8 +292,6 @@ class RLVFEnv(BaseEnv):
                     "b_np":       {k: v[idx].cpu().numpy()
                                    for k, v in b_batch.items()},
                     "d_np":       d_batch[idx].cpu().numpy(),
-                    "A_np":       A_np,
-                    "B_np":       B_np,
                     "kl_weight":  self.kl_weight,
                 })
                 idx += 1
@@ -300,12 +305,17 @@ class RLVFEnv(BaseEnv):
         kls     = [r["kl"]     for r in results]
         errors  = [r for r in results if "error" in r]
         n       = len(results)
+        H  = float(self.last_entropy.nanmean().item()) \
+            if self.last_entropy is not None else float("nan")
+        pm = float(self.last_pmax.nanmean().item()) \
+            if self.last_pmax is not None else float("nan")
         print(
             f"[RLVFEnv:{tag}] "
             f"reward: {sum(rewards)/n:+.4f} | "
             f"score: {sum(scores)/n:+.4f} | "
             f"score_disc: {sum(scores_disc)/n:+.4f} | "
             f"kl: {sum(kls)/n:.4f} | "
+            f"H: {H:.3f} | pmax: {pm:.3f} | "
             f"errors: {len(errors)}/{n}"
         )
         if errors:

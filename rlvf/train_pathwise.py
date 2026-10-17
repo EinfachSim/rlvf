@@ -10,6 +10,10 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--num_workers", type=int, default=2)
 parser.add_argument("--episodes_per_worker", type=int, default=16)
+parser.add_argument("--init_from", type=str, default="",
+                    help="optional checkpoint to warm-start the HN weights from "
+                         "(optimizer state is NOT restored, step counter starts at 0). "
+                         "Use a pre-saturation checkpoint, e.g. v4 step 20-25.")
 args = parser.parse_args()
 
 NUM_WORKERS         = args.num_workers
@@ -18,7 +22,7 @@ EPISODES_PER_WORKER = args.episodes_per_worker
 # ── Config ────────────────────────────────────────────────────────────────────
 DEVICE          = "cuda:0"
 LUSTRE          = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf"
-CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_pathwise_v4"
+CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_pathwise_v5"   # new dir: v4 is saturated
 
 NUM_LAYERS      = 32
 LAYER_TYPES     = ["q", "v"]
@@ -31,6 +35,11 @@ GRAD_CLIP       = 1.0
 BATCH_SIZE      = 64
 KL_WEIGHT       = 0.1
 MASS_COEF       = 0.1
+# Entropy floor on the 6-digit answer distributions (see workers.run_episode_grad).
+# Keeps the expected-value surrogate's gradient alive. Watch train/pmax: it
+# should stay clearly below 1 (e.g. < 0.9) while the score improves.
+ENT_FLOOR_COEF  = 0.1
+H_MIN           = 0.5     # nats; ln(6) = 1.79 is the maximum
 
 TOTAL_STEPS     = 1000
 EVAL_EVERY      = 5
@@ -40,11 +49,13 @@ SAVE_EVERY      = 5
 print("Initializing Weights & Biases...")
 wandb.init(
     project="rlvf-pvq-alignment",
-    name="mistral-7b-hypernetwork-pathwise-v1",
+    name="mistral-7b-hypernetwork-pathwise-v5-entfloor",
     config={
         "num_layers": NUM_LAYERS, "layer_types": LAYER_TYPES, "rank": RANK,
         "lr": LR, "grad_clip": GRAD_CLIP, "batch_size": BATCH_SIZE,
-        "kl_weight": KL_WEIGHT, "total_steps": TOTAL_STEPS,
+        "kl_weight": KL_WEIGHT, "mass_coef": MASS_COEF,
+        "ent_floor_coef": ENT_FLOOR_COEF, "h_min": H_MIN,
+        "total_steps": TOTAL_STEPS, "init_from": args.init_from,
         "trainer": "pathwise",
     },
 )
@@ -82,6 +93,11 @@ start_step = 0
 ckpts = sorted(Path(CHECKPOINT_DIR).glob("hn_step_*.pt"))
 if ckpts:
     start_step = load_checkpoint(str(ckpts[-1]))
+elif args.init_from:
+    ckpt = torch.load(args.init_from, map_location=DEVICE)
+    policy.load_state_dict(ckpt["model"], strict=True)
+    print(f"[train] Warm-started HN weights from {args.init_from} "
+          f"(step {ckpt['step']}); fresh optimizer, step counter at 0")
 
 print(f"\nStarting pathwise training from step {start_step}...")
 
@@ -113,7 +129,8 @@ try:
         res = env.step_batch_grad(
             action_batch=({k: v.cpu() for k, v in b_ship.items()}, d_ship.cpu()),
             states=states.cpu(), mode="pathwise",
-            grad_kwargs={"mass_coef": MASS_COEF},
+            grad_kwargs={"mass_coef": MASS_COEF,
+                         "ent_floor_coef": ENT_FLOOR_COEF, "h_min": H_MIN},
         )
         ok = res["ok"]
         n_ok = int(ok.sum().item())
@@ -140,12 +157,20 @@ try:
         rewards = res["rewards"]
         mass_pens = torch.tensor([r.get("mass_penalty", float("nan"))
                                   for r in res["results"]])
+        ent_pens = torch.tensor([r.get("ent_penalty", float("nan"))
+                                 for r in res["results"]])
+        score_disc = torch.tensor([r.get("score_disc", float("nan"))
+                                   for r in res["results"]])
         log_dict = {
             "train/reward_mean": rewards.mean().item(),
             "train/reward_std":  rewards.std().item(),
             "train/reward_mean_ok": rewards[ok].mean().item(),
             "train/score_mean_ok":  float(env.last_scores[ok].mean().item()),
+            "train/score_disc_mean": float(score_disc[ok].nanmean().item()),
             "train/mass_penalty": float(mass_pens[ok].nanmean().item()),
+            "train/ent_penalty":  float(ent_pens[ok].nanmean().item()),
+            "train/entropy":      float(env.last_entropy[ok].nanmean().item()),
+            "train/pmax":         float(env.last_pmax[ok].nanmean().item()),
             "train/score_mean":  float(env.last_scores.mean().item()),
             "train/kl_mean":     float(env.last_kls[ok].mean().item()),
             "train/digit_mass":  float(env.last_digit_mass[ok].mean().item()),
@@ -159,8 +184,11 @@ try:
             f"[train] step {step:04d} | "
             f"reward: {log_dict['train/reward_mean']:+.4f} "
             f"(ok: {log_dict['train/reward_mean_ok']:+.4f}) | "
-            f"score: {log_dict['train/score_mean']:+.4f} | "
+            f"score: {log_dict['train/score_mean']:+.4f} "
+            f"(disc: {log_dict['train/score_disc_mean']:+.4f}) | "
             f"kl: {log_dict['train/kl_mean']:.4f} | "
+            f"H: {log_dict['train/entropy']:.3f} | "
+            f"pmax: {log_dict['train/pmax']:.3f} | "
             f"env_g: {log_dict['train/env_grad_norm_mean']:.4f} | "
             f"hn_g: {log_dict['train/hn_grad_norm']:.4f} | "
             f"err: {env.last_errors}"
@@ -190,19 +218,26 @@ try:
                 "eval/score_disc_mean": eval_metrics["eval_score_disc_mean"],
                 "eval/kl_mean":     eval_metrics["eval_kl_mean"],
                 "eval/digit_mass":  eval_metrics["eval_digit_mass"],
-                
+                "eval/entropy":     eval_metrics["eval_entropy"],
+                "eval/pmax":        eval_metrics["eval_pmax"],
+
                 "eval_zero_mean/reward_mean": eval_metrics_zero_mean["eval_reward_mean"],
                 "eval_zero_mean/reward_std":  eval_metrics_zero_mean["eval_reward_std"],
                 "eval_zero_mean/score_mean":  eval_metrics_zero_mean["eval_score_mean"],
                 "eval_zero_mean/score_disc_mean": eval_metrics_zero_mean["eval_score_disc_mean"],
                 "eval_zero_mean/kl_mean":     eval_metrics_zero_mean["eval_kl_mean"],
                 "eval_zero_mean/digit_mass":  eval_metrics_zero_mean["eval_digit_mass"],
+                "eval_zero_mean/entropy":     eval_metrics_zero_mean["eval_entropy"],
+                "eval_zero_mean/pmax":        eval_metrics_zero_mean["eval_pmax"],
             }, step=step)
             print(f"[eval]  step {step:04d} | "
                   f"reward: {eval_metrics['eval_reward_mean']:+.4f} ± "
                   f"{eval_metrics['eval_reward_std']:.4f} | "
-                  f"score: {eval_metrics['eval_score_mean']:+.4f} | "
-                  f"kl: {eval_metrics['eval_kl_mean']:.4f}")
+                  f"score: {eval_metrics['eval_score_mean']:+.4f} "
+                  f"(disc: {eval_metrics['eval_score_disc_mean']:+.4f}) | "
+                  f"kl: {eval_metrics['eval_kl_mean']:.4f} | "
+                  f"H: {eval_metrics['eval_entropy']:.3f} | "
+                  f"pmax: {eval_metrics['eval_pmax']:.3f}")
 
         if step % SAVE_EVERY == 0 and step > 0:
             save_checkpoint(step)
