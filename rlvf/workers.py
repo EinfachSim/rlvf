@@ -701,7 +701,7 @@ class EnvWorker:
         A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
         B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
         try:
-            self._apply_vera(b, d, A, B)
+            self._apply_vera(b, d)
             answers, digit_mass, norm = self._answer_questionnaire()
             return {
                 "expected": answers.cpu().numpy(),                 # (57,) E[k]
