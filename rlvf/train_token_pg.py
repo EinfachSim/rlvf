@@ -32,7 +32,7 @@ RANK            = 8
 
 LR              = 3e-5
 GRAD_CLIP       = 1.0
-BATCH_SIZE      = 64
+BATCH_SIZE      = 32
 KL_WEIGHT       = 0.1 #for generation-keeping
 TOK_KL_WEIGHT   = 0.00 #not used, was a stupid idea
 ENT_COEF        = 0.0 #not used (linear entropy bonus)
