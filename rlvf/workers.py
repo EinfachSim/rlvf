@@ -511,11 +511,15 @@ class EnvWorker:
         Returns loss gradients wrt (b, d), i.e. the head node minimizes the
         surrogate sum((b, grad_b)) + sum((d, grad_d)).
 
-        ent_floor_coef / h_min (pathwise only): entropy-floor regularizer
+        ent_floor_coef / h_min (both modes): entropy-floor regularizer
             L_ent = (1/57) * sum_i max(0, h_min - H(pi_i))
         on the renormalized 6-digit distributions. Prevents pi_i from
         saturating to one-hot, where the expected-value surrogate has zero
-        gradient (d a_hat / d z_k = pi_k (k - a_hat) = 0 for one-hot pi).
+        gradient (d a_hat / d z_k = pi_k (k - a_hat) = 0 for one-hot pi) and
+        where the policy gradient also dies (grad log pi -> 0, LOO advantage
+        -> 0 because every sample is identical). Only active for items whose
+        distribution is sharper than h_min; the linear bonus ent_coef (token_pg)
+        is kept separately.
         """
         import time
         assert mode in ("pathwise", "token_pg")
@@ -599,6 +603,7 @@ class EnvWorker:
                 # need to refactor if i have time
                 kl_tok_total = 0.0
                 ent_total = 0.0
+                ent_pen_total = 0.0
                 for lo in range(0, n_items, QUEST_CHUNK):
                     rows = slice(lo, min(lo + QUEST_CHUNK, n_items))
                     logits = self._quest_logits_chunk(rows)  # (n, V)
@@ -619,18 +624,22 @@ class EnvWorker:
                          for ids in self._digit_id_lists], -1).sum(-1)
                     mass_pen = -torch.log(
                         mass_chunk.clamp_min(1e-6)).sum() / n_items
+                    ent_pen = F.relu(h_min - H).sum() / n_items  # entropy floor
                     loss_chunk = (
                         -(logpi * adv[rows]).sum()
                         - ent_coef * H.sum()
+                        + ent_floor_coef * ent_pen
                         + tok_kl_weight * kl_i.sum() / n_items
                         + mass_coef * mass_pen
                     )
                     loss_chunk.backward()
                     kl_tok_total += float(kl_i.sum().item())
                     ent_total += float(H.sum().item())
+                    ent_pen_total += float(ent_pen.item())
                 kl_tok = kl_tok_total / n_items
                 info["kl_token"] = kl_tok
                 info["entropy"] = ent_total / n_items
+                info["ent_penalty"] = ent_pen_total
                 info["pmax"] = float(norm.max(dim=-1).values.mean().item())
                 if DOMAIN_KL_IN_LOSS and kl_weight > 0:
                     kl = self._domain_kl_with_grad(kl_weight)

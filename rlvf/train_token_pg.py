@@ -35,7 +35,12 @@ GRAD_CLIP       = 1.0
 BATCH_SIZE      = 64
 KL_WEIGHT       = 0.1 #for generation-keeping
 TOK_KL_WEIGHT   = 0.00 #not used, was a stupid idea
-ENT_COEF        = 0.0 #not used
+ENT_COEF        = 0.0 #not used (linear entropy bonus)
+# Entropy floor on the 6-digit answer distributions, same as in pathwise:
+# guards against pi_i collapsing to one-hot (zero policy gradient, zero
+# LOO advantage). Only active below H_MIN.
+ENT_FLOOR_COEF  = 0.1
+H_MIN           = 0.5
 TEMPERATURE     = 1.0
 
 TOTAL_STEPS     = 1000
@@ -52,6 +57,7 @@ wandb.init(
         "lr": LR, "grad_clip": GRAD_CLIP, "batch_size": BATCH_SIZE,
         "kl_weight": KL_WEIGHT, "tok_kl_weight": TOK_KL_WEIGHT,
         "ent_coef": ENT_COEF, "temperature": TEMPERATURE,
+        "ent_floor_coef": ENT_FLOOR_COEF, "h_min": H_MIN,
         "total_steps": TOTAL_STEPS, "trainer": "token_pg",
     },
 )
@@ -99,6 +105,8 @@ GRAD_KWARGS = {
     "ent_coef": ENT_COEF,
     "temperature": TEMPERATURE,
     "mass_coef": MASS_COEF,
+    "ent_floor_coef": ENT_FLOOR_COEF,
+    "h_min": H_MIN,
 }
 
 print(f"\nStarting token-PG training from step {start_step}...")
@@ -153,9 +161,11 @@ try:
         kl_tok = [r.get("kl_token", float("nan")) for r in res["results"]]
         ent    = [r.get("entropy", float("nan")) for r in res["results"]]
         adv_sd = [r.get("adv_std", float("nan")) for r in res["results"]]
+        ent_pen = [r.get("ent_penalty", float("nan")) for r in res["results"]]
         kl_tok_mean = float(torch.tensor(kl_tok)[ok].nanmean().item())
         ent_mean    = float(torch.tensor(ent)[ok].nanmean().item())
         adv_sd_mean = float(torch.tensor(adv_sd)[ok].nanmean().item())
+        ent_pen_mean = float(torch.tensor(ent_pen)[ok].nanmean().item())
 
         log_dict = {
             "train/reward_mean": rewards[ok].mean().item(),
@@ -164,6 +174,7 @@ try:
             "train/kl_mean":     float(env.last_kls[ok].mean().item()),
             "train/kl_token_mean": kl_tok_mean,
             "train/entropy_mean":  ent_mean,
+            "train/ent_penalty":   ent_pen_mean,
             "train/adv_std_mean":  adv_sd_mean,
             "train/digit_mass":  float(env.last_digit_mass[ok].mean().item()),
             "train/pmax":        float(env.last_pmax[ok].nanmean().item()),
@@ -178,6 +189,7 @@ try:
             f"reward: {log_dict['train/reward_mean']:+.4f} | "
             f"score(disc): {log_dict['train/score_mean']:+.4f} | "
             f"kl_tok: {kl_tok_mean:.4f} | H: {ent_mean:.3f} | "
+            f"pmax: {log_dict['train/pmax']:.3f} | "
             f"adv_sd: {adv_sd_mean:.3f} | hn_g: {grad_norm.item():.4f} | "
             f"err: {env.last_errors}"
         )
