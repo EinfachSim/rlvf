@@ -5,6 +5,7 @@ import wandb
 
 from rlvf.env import RLVFEnv
 from rlvf.model import HyperNetwork
+from rlvf.data import whitening_matrix
 import argparse
 
 parser = argparse.ArgumentParser()
@@ -29,10 +30,12 @@ LAYER_TYPES     = ["q", "v"]
 DIMS            = {"q": [4096, 4096], "v": [1024, 4096]}
 PROFILE_DIM     = 19
 RANK            = 8
+WHITEN_INPUT    = True    # cold start: whiten the profile input (must match the pathwise runs
+                          # you compare against); warm start: inherited from the checkpoint
 
 LR              = 3e-5
 GRAD_CLIP       = 1.0
-BATCH_SIZE      = 32
+BATCH_SIZE      = 64
 KL_WEIGHT       = 0.1 #for generation-keeping
 TOK_KL_WEIGHT   = 0.00 #not used, was a stupid idea
 ENT_COEF        = 0.0 #not used (linear entropy bonus)
@@ -57,6 +60,7 @@ wandb.init(
         "lr": LR, "grad_clip": GRAD_CLIP, "batch_size": BATCH_SIZE,
         "kl_weight": KL_WEIGHT, "tok_kl_weight": TOK_KL_WEIGHT,
         "ent_coef": ENT_COEF, "temperature": TEMPERATURE,
+        "whiten_input": WHITEN_INPUT, "init_from": args.init_from,
         "ent_floor_coef": ENT_FLOOR_COEF, "h_min": H_MIN,
         "total_steps": TOTAL_STEPS, "trainer": "token_pg",
     },
@@ -70,11 +74,16 @@ print("Initialising HyperNetwork...")
 # checkpoint trained with a whitened input carries a "whiten" buffer and a
 # narrower first layer.
 _src = args.init_from or (sorted(Path(f"{LUSTRE}/{args.checkpoint_dir}").glob("hn_step_*.pt"))[-1:] or [None])[0]
-_whiten = None
 if _src:
     _sd = torch.load(str(_src), map_location="cpu")["model"]
     _whiten = _sd.get("whiten")
     print(f"[train] HN input from {_src}: {'whitened' if _whiten is not None else 'raw'}")
+    assert (_whiten is not None) == WHITEN_INPUT, (
+        f"checkpoint input is {'whitened' if _whiten is not None else 'raw'} but "
+        f"WHITEN_INPUT={WHITEN_INPUT}; set the flag to match the checkpoint")
+else:
+    _whiten = whitening_matrix() if WHITEN_INPUT else None
+    print(f"[train] Cold start, HN input: {'whitened' if WHITEN_INPUT else 'raw'}")
 policy = HyperNetwork(
     num_layers=NUM_LAYERS, layer_types=LAYER_TYPES, dims=DIMS,
     profile_dim=PROFILE_DIM, rank=RANK, whiten=_whiten,
@@ -103,8 +112,8 @@ if ckpts:
     ckpt = torch.load(str(ckpts[-1]), map_location=DEVICE)
     policy.load_state_dict(ckpt["model"], strict=False)
     optimizer.load_state_dict(ckpt["optimizer"])
-    start_step = ckpt["step"]
-    print(f"[train] Resumed from {ckpts[-1]} (step {start_step})")
+    start_step = ckpt["step"] + 1     # checkpoint N = weights after update N
+    print(f"[train] Resumed from {ckpts[-1]} (continuing at step {start_step})")
 
 MASS_COEF = 0.1
 GRAD_KWARGS = {
@@ -128,6 +137,8 @@ env = RLVFEnv(
     train_means=None,          # zero-mean: uniform coverage of the profile space
     eval_means="empirical",    # population prior (Schwartz & Cieciuch 2022, Table 5)
 )
+for _ in range(start_step):            # continue the profile stream on resume
+    env.train_sampler.sample_batch(env.batch_size)
 print(f"Batch size: {env.batch_size}")
 
 _last_step = start_step
@@ -175,7 +186,9 @@ try:
         ent_pen_mean = float(torch.tensor(ent_pen)[ok].nanmean().item())
 
         align = env.alignment_stats(states.cpu())
+        const_baseline = -float((states.cpu() ** 2).mean().item())
         log_dict = {
+            "train/score_excess": float(env.last_scores[ok].mean().item()) - const_baseline,
             "train/align_cross": align["cross"],
             "train/r2_mean":     align["r2_mean"],
             "train/r2_max":      align["r2_max"],
@@ -199,7 +212,9 @@ try:
         print(
             f"[train] step {step:04d} | "
             f"reward: {log_dict['train/reward_mean']:+.4f} | "
-            f"score(disc): {log_dict['train/score_mean']:+.4f} | "
+            f"score(disc): {log_dict['train/score_mean']:+.4f} "
+            f"(excess {log_dict['train/score_excess']:+.4f}) | "
+            f"cross: {align['cross']:+.4f} | r2: {align['r2_mean']:.3f} | "
             f"kl_tok: {kl_tok_mean:.4f} | H: {ent_mean:.3f} | "
             f"pmax: {log_dict['train/pmax']:.3f} | "
             f"adv_sd: {adv_sd_mean:.3f} | hn_g: {grad_norm.item():.4f} | "

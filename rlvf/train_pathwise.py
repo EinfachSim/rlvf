@@ -23,7 +23,7 @@ EPISODES_PER_WORKER = args.episodes_per_worker
 # ── Config ────────────────────────────────────────────────────────────────────
 DEVICE          = "cuda:0"
 LUSTRE          = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf"
-CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_pathwise_v5_whitened"   # v5 = entropy floor, v6 = + whitened input
+CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_pathwise_v6"   # v5 = entropy floor, v6 = + whitened input
 
 NUM_LAYERS      = 32
 LAYER_TYPES     = ["q", "v"]
@@ -32,9 +32,9 @@ PROFILE_DIM     = 19
 RANK            = 8
 WHITEN_INPUT    = True    # fixed whitening of the profile inside the HN (data.whitening_matrix)
 
-LR              = 2e-4
+LR              = 3e-4
 GRAD_CLIP       = 1.0
-BATCH_SIZE      = 32
+BATCH_SIZE      = 64
 KL_WEIGHT       = 0.1
 MASS_COEF       = 0.1
 # Entropy floor on the 6-digit answer distributions (see workers.run_episode_grad).
@@ -92,7 +92,9 @@ def load_checkpoint(path: str) -> int:
     print(result.unexpected_keys)
     optimizer.load_state_dict(ckpt["optimizer"])
     print(f"[train] Resumed from {path} (step {ckpt['step']})")
-    return ckpt["step"]
+    # The checkpoint at step N holds the weights AFTER update N (it is saved at
+    # the end of iteration N), so training continues at N + 1.
+    return ckpt["step"] + 1
 
 start_step = 0
 ckpts = sorted(Path(CHECKPOINT_DIR).glob("hn_step_*.pt"))
@@ -116,6 +118,11 @@ env = RLVFEnv(
     train_means=None,          # zero-mean: uniform coverage of the profile space
     eval_means="empirical",    # population prior (Schwartz & Cieciuch 2022, Table 5)
 )
+# On resume, advance the training sampler past the batches already consumed so
+# the profile stream continues instead of replaying from the seed. (The eval
+# samplers are separate and unaffected.)
+for _ in range(start_step):
+    env.train_sampler.sample_batch(env.batch_size)
 print(f"Batch size: {env.batch_size}")
 
 _last_step = start_step
