@@ -32,9 +32,9 @@ PROFILE_DIM     = 19
 RANK            = 8
 WHITEN_INPUT    = True    # fixed whitening of the profile inside the HN (data.whitening_matrix)
 
-LR              = 3e-4
+LR              = 2e-4
 GRAD_CLIP       = 1.0
-BATCH_SIZE      = 64
+BATCH_SIZE      = 32
 KL_WEIGHT       = 0.1
 MASS_COEF       = 0.1
 # Entropy floor on the 6-digit answer distributions (see workers.run_episode_grad).
