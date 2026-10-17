@@ -60,7 +60,7 @@ SCORING_KEY = {
 
 @ray.remote(num_gpus=1, num_cpus=8)
 class EnvWorker:
-    def __init__(self):
+    def __init__(self, A, B):
         self.device = "cuda:0"
 
         print(f"[EnvWorker] Waiting for model load lock...")

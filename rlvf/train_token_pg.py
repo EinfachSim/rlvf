@@ -75,16 +75,6 @@ if args.init_from:
     print(print(result.unexpected_keys))
     print(f"[train] Warm-started from {args.init_from} (step {ckpt['step']})")
 
-print("Spawning environment workers...")
-env = RLVFEnv(
-    num_workers=NUM_WORKERS, episodes_per_worker=EPISODES_PER_WORKER,
-    kl_weight=KL_WEIGHT, batch_size=BATCH_SIZE,
-    layer_types=len(LAYER_TYPES), rank=RANK, num_layers=NUM_LAYERS,
-    train_means=None,          # zero-mean: uniform coverage of the profile space
-    eval_means="empirical",    # population prior (Schwartz & Cieciuch 2022, Table 5)
-)
-print(f"Batch size: {env.batch_size}")
-
 Path(CHECKPOINT_DIR).mkdir(parents=True, exist_ok=True)
 
 def save_checkpoint(step: int):
@@ -113,6 +103,18 @@ GRAD_KWARGS = {
 
 print(f"\nStarting token-PG training from step {start_step}...")
 
+print("Spawning environment workers...")
+env = RLVFEnv(
+    A=policy.A,
+    B=policy.B,
+    num_workers=NUM_WORKERS, episodes_per_worker=EPISODES_PER_WORKER,
+    kl_weight=KL_WEIGHT, batch_size=BATCH_SIZE,
+    layer_types=len(LAYER_TYPES), rank=RANK, num_layers=NUM_LAYERS,
+    train_means=None,          # zero-mean: uniform coverage of the profile space
+    eval_means="empirical",    # population prior (Schwartz & Cieciuch 2022, Table 5)
+)
+print(f"Batch size: {env.batch_size}")
+
 _last_step = start_step
 try:
     for step in range(start_step, TOTAL_STEPS):
@@ -122,11 +124,10 @@ try:
 
         with torch.no_grad():
             b_ship, d_ship = policy.act(states)
-        A, B = policy.A, policy.B
 
         res = env.step_batch_grad(
             action_batch=({k: v.cpu() for k, v in b_ship.items()}, d_ship.cpu()),
-            states=states.cpu(), A=A, B=B, mode="token_pg",
+            states=states.cpu(), mode="token_pg",
             grad_kwargs=GRAD_KWARGS,
         )
         ok = res["ok"]
@@ -187,7 +188,6 @@ try:
             eval_metrics = env.eval_batch(
                 action_batch=({k: v.cpu() for k, v in eval_b.items()},
                                 eval_d.cpu()),
-                A=A, B=B,
             )
             #zero mean evals 
             eval_states_zero_mean = env.eval_profiles_zero_mean.to(DEVICE)
@@ -196,7 +196,6 @@ try:
             eval_metrics_zero_mean = env.eval_batch(
                 action_batch=({k: v.cpu() for k, v in eval_b.items()},
                                 eval_d.cpu()),
-                A=A, B=B,
             )
             wandb.log({
                 "eval/reward_mean": eval_metrics["eval_reward_mean"],

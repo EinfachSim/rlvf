@@ -24,6 +24,8 @@ class BaseEnv(ABC):
 class RLVFEnv(BaseEnv):
     def __init__(
         self,
+        A,
+        B,
         num_workers: int = 16,
         episodes_per_worker: int = 4,
         kl_weight: float = 0.1,
@@ -57,6 +59,9 @@ class RLVFEnv(BaseEnv):
         self.last_delta_fro = None
         self.last_errors = 0
 
+        self.A = A
+        self.B = B
+
         # ── Samplers ──────────────────────────────────────────────────────────
         # Training: zero-mean profiles so no value is privileged a priori and
         # the HN is trained for coverage of the whole admissible profile space.
@@ -83,7 +88,7 @@ class RLVFEnv(BaseEnv):
               f"(batch_size={self.batch_size}, "
               f"Approx. {self.batch_size // num_workers} episodes/worker)...")
         self.pool = ActorPool([
-            EnvWorker.remote() for _ in range(num_workers)
+            EnvWorker.remote(A, B) for _ in range(num_workers)
         ])
         print("[RLVFEnv] All workers ready.")
 
@@ -98,14 +103,12 @@ class RLVFEnv(BaseEnv):
         self,
         action_batch, # (b, d): b dict k->(B, L, d_out[k]); d (B, L*T, rank)
         states: torch.Tensor, # (batch_size, 19)
-        A: dict, # {"q": (L, rank, d_in), "v": ...}
-        B: dict, # {"q": (L, d_out, rank), "v": ...}
     ) -> torch.Tensor:
         """
         Fan out batch to workers, collect rewards.
         Returns rewards: (batch_size,)
         """
-        return self._run_pool(action_batch, states, A, B)
+        return self._run_pool(action_batch, states, self.A, self.B)
 
     def eval_batch(
         self,
@@ -138,8 +141,6 @@ class RLVFEnv(BaseEnv):
         self,
         action_batch, # (b, d) as in step_batch
         states: torch.Tensor,
-        A: dict,
-        B: dict,
         mode: str = "pathwise",
         grad_kwargs: dict = None,
     ) -> dict:
@@ -154,8 +155,8 @@ class RLVFEnv(BaseEnv):
         d_batch = d_flat.reshape(
             n, self.num_layers, self.layer_types, self.rank)
 
-        A_np = {k: v.detach().cpu().numpy() for k, v in A.items()}
-        B_np = {k: v.detach().cpu().numpy() for k, v in B.items()}
+        A_np = {k: v.detach().cpu().numpy() for k, v in self.A.items()}
+        B_np = {k: v.detach().cpu().numpy() for k, v in self.B.items()}
 
         gk = dict(grad_kwargs or {})
         payloads = self._build_payloads(b_batch, d_batch, states, A_np, B_np, n)
