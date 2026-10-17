@@ -87,6 +87,27 @@ def _nearest_corr(corr: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     return c
 
 
+def whitening_matrix(corr=None, sd=PROFILE_SD, eps=1e-6):
+    """
+    Fixed linear map W (19, k) such that z = p @ W has identity covariance
+    under the TRAINING sampler (zero mean, corr * sd^2, ipsatized). Directions
+    with (near-)zero variance -- ipsatization removes exactly one -- are
+    dropped, so k = 18 in practice. Whitening is w.r.t. the training
+    distribution only; profiles with non-zero means (e.g. the empirical eval
+    set) are mapped by the same W and keep their offset.
+    """
+    corr = _nearest_corr(EMPIRICAL_CORR if corr is None else np.asarray(corr))
+    cov = corr * (sd ** 2)
+    n = cov.shape[0]
+    # exact covariance of the ipsatized profile: C (I - 11^T/n) C^T with C = I - 11^T/n
+    C = np.eye(n) - np.full((n, n), 1.0 / n)
+    cov_ips = C @ cov @ C.T
+    w, V = np.linalg.eigh(cov_ips)
+    keep = w > eps * w.max()
+    W = V[:, keep] / np.sqrt(w[keep])
+    return W.astype(np.float32)          # (19, 18)
+
+
 class ValueProfileSampler:
     """
     Samples synthetic PVQ-RR value profiles (centered / ipsatized scores).

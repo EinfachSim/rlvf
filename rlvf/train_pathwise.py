@@ -5,6 +5,7 @@ import wandb
 
 from rlvf.env import RLVFEnv
 from rlvf.model import HyperNetwork
+from rlvf.data import whitening_matrix
 import argparse
 
 parser = argparse.ArgumentParser()
@@ -22,13 +23,14 @@ EPISODES_PER_WORKER = args.episodes_per_worker
 # ── Config ────────────────────────────────────────────────────────────────────
 DEVICE          = "cuda:0"
 LUSTRE          = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf"
-CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_pathwise_v5"   # new dir: v4 is saturated
+CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_pathwise_v6"   # v5 = entropy floor, v6 = + whitened input
 
 NUM_LAYERS      = 32
 LAYER_TYPES     = ["q", "v"]
 DIMS            = {"q": [4096, 4096], "v": [1024, 4096]}
 PROFILE_DIM     = 19
 RANK            = 8
+WHITEN_INPUT    = True    # fixed whitening of the profile inside the HN (data.whitening_matrix)
 
 LR              = 3e-4
 GRAD_CLIP       = 1.0
@@ -49,12 +51,13 @@ SAVE_EVERY      = 5
 print("Initializing Weights & Biases...")
 wandb.init(
     project="rlvf-pvq-alignment",
-    name="mistral-7b-hypernetwork-pathwise-v5-entfloor",
+    name="mistral-7b-hypernetwork-pathwise-v6-whitened",
     config={
         "num_layers": NUM_LAYERS, "layer_types": LAYER_TYPES, "rank": RANK,
         "lr": LR, "grad_clip": GRAD_CLIP, "batch_size": BATCH_SIZE,
         "kl_weight": KL_WEIGHT, "mass_coef": MASS_COEF,
         "ent_floor_coef": ENT_FLOOR_COEF, "h_min": H_MIN,
+        "whiten_input": WHITEN_INPUT,
         "total_steps": TOTAL_STEPS, "init_from": args.init_from,
         "trainer": "pathwise",
     },
@@ -67,7 +70,9 @@ print("Initialising HyperNetwork...")
 policy = HyperNetwork(
     num_layers=NUM_LAYERS, layer_types=LAYER_TYPES, dims=DIMS,
     profile_dim=PROFILE_DIM, rank=RANK,
+    whiten=whitening_matrix() if WHITEN_INPUT else None,
 ).to(DEVICE)
+print(f"[train] HN profile input: {'whitened, ' if WHITEN_INPUT else ''}{policy.in_dim}-dim")
 policy.train()
 
 optimizer = torch.optim.Adam(policy.parameters(), lr=LR)
@@ -161,7 +166,18 @@ try:
                                  for r in res["results"]])
         score_disc = torch.tensor([r.get("score_disc", float("nan"))
                                    for r in res["results"]])
+        align = env.alignment_stats(states.cpu())
+        # score of the constant p_hat = 0 predictor on THIS batch; the excess
+        # over it is 0 for any profile-independent policy and has none of the
+        # target-sampling noise of the raw score.
+        const_baseline = -float((states.cpu() ** 2).mean().item())
         log_dict = {
+            "train/score_excess": float(env.last_scores[ok].mean().item()) - const_baseline,
+            "train/align_cross": align["cross"],
+            "train/r2_mean":     align["r2_mean"],
+            "train/r2_max":      align["r2_max"],
+            "train/phat_var":    align["phat_var"],
+            **{f"train/r2_value/{j:02d}": v for j, v in enumerate(align["r2_per_value"])},
             "train/reward_mean": rewards.mean().item(),
             "train/reward_std":  rewards.std().item(),
             "train/reward_mean_ok": rewards[ok].mean().item(),
@@ -189,6 +205,8 @@ try:
             f"kl: {log_dict['train/kl_mean']:.4f} | "
             f"H: {log_dict['train/entropy']:.3f} | "
             f"pmax: {log_dict['train/pmax']:.3f} | "
+            f"excess: {log_dict['train/score_excess']:+.4f} | "
+            f"cross: {align['cross']:+.4f} | r2: {align['r2_mean']:.3f} | "
             f"env_g: {log_dict['train/env_grad_norm_mean']:.4f} | "
             f"hn_g: {log_dict['train/hn_grad_norm']:.4f} | "
             f"err: {env.last_errors}"
@@ -210,7 +228,7 @@ try:
             eval_metrics_zero_mean = env.eval_batch(
                 action_batch=({k: v.cpu() for k, v in eval_b.items()},
                                 eval_d.cpu()),
-                profiles="zero_mean"
+                profiles=env.eval_profiles_zero_mean, tag="EVAL0",
             )
             wandb.log({
                 "eval/reward_mean": eval_metrics["eval_reward_mean"],
@@ -221,6 +239,10 @@ try:
                 "eval/digit_mass":  eval_metrics["eval_digit_mass"],
                 "eval/entropy":     eval_metrics["eval_entropy"],
                 "eval/pmax":        eval_metrics["eval_pmax"],
+                "eval/align_cross": eval_metrics["eval_align_cross"],
+                "eval/r2_mean":     eval_metrics["eval_r2_mean"],
+                "eval/r2_max":      eval_metrics["eval_r2_max"],
+                "eval/phat_var":    eval_metrics["eval_phat_var"],
 
                 "eval_zero_mean/reward_mean": eval_metrics_zero_mean["eval_reward_mean"],
                 "eval_zero_mean/reward_std":  eval_metrics_zero_mean["eval_reward_std"],
@@ -230,6 +252,9 @@ try:
                 "eval_zero_mean/digit_mass":  eval_metrics_zero_mean["eval_digit_mass"],
                 "eval_zero_mean/entropy":     eval_metrics_zero_mean["eval_entropy"],
                 "eval_zero_mean/pmax":        eval_metrics_zero_mean["eval_pmax"],
+                "eval_zero_mean/align_cross": eval_metrics_zero_mean["eval_align_cross"],
+                "eval_zero_mean/r2_mean":     eval_metrics_zero_mean["eval_r2_mean"],
+                "eval_zero_mean/phat_var":    eval_metrics_zero_mean["eval_phat_var"],
             }, step=step)
             print(f"[eval]  step {step:04d} | "
                   f"reward: {eval_metrics['eval_reward_mean']:+.4f} ± "
@@ -238,7 +263,9 @@ try:
                   f"(disc: {eval_metrics['eval_score_disc_mean']:+.4f}) | "
                   f"kl: {eval_metrics['eval_kl_mean']:.4f} | "
                   f"H: {eval_metrics['eval_entropy']:.3f} | "
-                  f"pmax: {eval_metrics['eval_pmax']:.3f}")
+                  f"pmax: {eval_metrics['eval_pmax']:.3f} | "
+                  f"cross: {eval_metrics['eval_align_cross']:+.4f} | "
+                  f"r2: {eval_metrics['eval_r2_mean']:.3f}")
 
         if step % SAVE_EVERY == 0 and step > 0:
             save_checkpoint(step)

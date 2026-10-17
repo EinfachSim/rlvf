@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 """
 Architecture inspired by, adapted and simplified from Text-to-LoRA
 https://arxiv.org/pdf/2506.06105
@@ -60,7 +61,16 @@ class HyperNetwork(torch.nn.Module):
     def __init__(self, num_layers=5, layer_types=["q", "v"],
                  dims={"q": [10, 20], "v": [10, 20]},
                  emb_l_dim=32, emb_t_dim=32, profile_dim=19,
-                 rank=8, head_in_dim=512, dropout=0.0):
+                 rank=8, head_in_dim=512, dropout=0.0,
+                 whiten=None):
+        """
+        whiten : None, or a (profile_dim, k) numpy/torch matrix W. If given,
+            the raw profile p is mapped to z = p @ W before entering the trunk
+            (fixed, not trained). Intended use: W = data.whitening_matrix(),
+            so that z has identity covariance under the training sampler and
+            every direction of profile space enters the HN at the same scale.
+            The external interface (act / forward) still takes raw profiles.
+        """
         super().__init__()
 
         self.num_layers = num_layers
@@ -81,10 +91,21 @@ class HyperNetwork(torch.nn.Module):
         for ti, k in enumerate(layer_types):
             self.register_buffer(f"pos_mask_{k}", (t.flatten() == ti))
 
+        # PROFILE PRE-PROCESSING
+        if whiten is not None:
+            W = torch.as_tensor(np.asarray(whiten), dtype=torch.float32)
+            assert W.shape[0] == profile_dim, W.shape
+            self.register_buffer("whiten", W)            # (profile_dim, k)
+            in_dim = W.shape[1]
+        else:
+            self.whiten = None
+            in_dim = profile_dim
+        self.in_dim = in_dim
+
         # EMBEDDINGS
         self.layer_emb = torch.nn.Embedding(self.num_layers, emb_l_dim)
         self.type_emb = torch.nn.Embedding(self.num_types, emb_t_dim)
-        context_dim = profile_dim + emb_l_dim + emb_t_dim
+        context_dim = in_dim + emb_l_dim + emb_t_dim
         self.mixer = Mixer(mlp_in=context_dim, dropout=dropout)
 
         # MLPS
@@ -156,6 +177,10 @@ class HyperNetwork(torch.nn.Module):
         b_mean : dict k -> (B, L, d_out[k])
         """
 
+        if self.whiten is not None:
+            x = x @ self.whiten          # (B, k): unit-variance, decorrelated
+        else:
+            x = x / 0.8                  # legacy: crude standardization
         h = self._trunk(x)
         d_mean = self.d_head_mean(h) # (B, L*T, rank)
         b_mean = {}

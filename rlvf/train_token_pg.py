@@ -66,9 +66,18 @@ ray.init(address="auto")
 print(f"Ray cluster resources: {ray.cluster_resources()}")
 
 print("Initialising HyperNetwork...")
+# The HN must be built to match the checkpoint it will load: a pathwise
+# checkpoint trained with a whitened input carries a "whiten" buffer and a
+# narrower first layer.
+_src = args.init_from or (sorted(Path(f"{LUSTRE}/{args.checkpoint_dir}").glob("hn_step_*.pt"))[-1:] or [None])[0]
+_whiten = None
+if _src:
+    _sd = torch.load(str(_src), map_location="cpu")["model"]
+    _whiten = _sd.get("whiten")
+    print(f"[train] HN input from {_src}: {'whitened' if _whiten is not None else 'raw'}")
 policy = HyperNetwork(
     num_layers=NUM_LAYERS, layer_types=LAYER_TYPES, dims=DIMS,
-    profile_dim=PROFILE_DIM, rank=RANK,
+    profile_dim=PROFILE_DIM, rank=RANK, whiten=_whiten,
 ).to(DEVICE)
 policy.train()
 
@@ -76,9 +85,7 @@ optimizer = torch.optim.Adam(policy.parameters(), lr=LR)
 
 if args.init_from:
     ckpt = torch.load(args.init_from, map_location=DEVICE)
-    result = policy.load_state_dict(ckpt["model"], strict=False)
-    print(result.missing_keys)
-    print(result.unexpected_keys)
+    result = policy.load_state_dict(ckpt["model"], strict=True)
     print(f"[train] Warm-started from {args.init_from} (step {ckpt['step']})")
 
 Path(CHECKPOINT_DIR).mkdir(parents=True, exist_ok=True)
@@ -167,7 +174,12 @@ try:
         adv_sd_mean = float(torch.tensor(adv_sd)[ok].nanmean().item())
         ent_pen_mean = float(torch.tensor(ent_pen)[ok].nanmean().item())
 
+        align = env.alignment_stats(states.cpu())
         log_dict = {
+            "train/align_cross": align["cross"],
+            "train/r2_mean":     align["r2_mean"],
+            "train/r2_max":      align["r2_max"],
+            "train/phat_var":    align["phat_var"],
             "train/reward_mean": rewards[ok].mean().item(),
             "train/reward_std":  rewards[ok].std().item(),
             "train/score_mean":  float(env.last_scores[ok].mean().item()),
@@ -209,7 +221,7 @@ try:
             eval_metrics_zero_mean = env.eval_batch(
                 action_batch=({k: v.cpu() for k, v in eval_b.items()},
                                 eval_d.cpu()),
-                profiles="zero_mean"
+                profiles=env.eval_profiles_zero_mean, tag="EVAL0",
             )
             wandb.log({
                 "eval/reward_mean": eval_metrics["eval_reward_mean"],
@@ -220,6 +232,10 @@ try:
                 "eval/digit_mass":  eval_metrics["eval_digit_mass"],
                 "eval/entropy":     eval_metrics["eval_entropy"],
                 "eval/pmax":        eval_metrics["eval_pmax"],
+                "eval/align_cross": eval_metrics["eval_align_cross"],
+                "eval/r2_mean":     eval_metrics["eval_r2_mean"],
+                "eval/r2_max":      eval_metrics["eval_r2_max"],
+                "eval/phat_var":    eval_metrics["eval_phat_var"],
 
                 "eval_zero_mean/reward_mean": eval_metrics_zero_mean["eval_reward_mean"],
                 "eval_zero_mean/reward_std":  eval_metrics_zero_mean["eval_reward_std"],
@@ -229,6 +245,9 @@ try:
                 "eval_zero_mean/digit_mass":  eval_metrics_zero_mean["eval_digit_mass"],
                 "eval_zero_mean/entropy":     eval_metrics_zero_mean["eval_entropy"],
                 "eval_zero_mean/pmax":        eval_metrics_zero_mean["eval_pmax"],
+                "eval_zero_mean/align_cross": eval_metrics_zero_mean["eval_align_cross"],
+                "eval_zero_mean/r2_mean":     eval_metrics_zero_mean["eval_r2_mean"],
+                "eval_zero_mean/phat_var":    eval_metrics_zero_mean["eval_phat_var"],
             }, step=step)
             print(f"[eval]  step {step:04d} | "
                     f"reward: {eval_metrics['eval_reward_mean']:+.4f} ± "
