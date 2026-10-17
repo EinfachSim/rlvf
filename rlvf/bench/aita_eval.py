@@ -66,15 +66,26 @@ def _infer_hn_config(sd: dict) -> dict:
     emb_l = sd["layer_emb.weight"].shape[1]
     emb_t = sd["type_emb.weight"].shape[1]
     context_dim = sd["mixer.layers.1.weight"].shape[1]
+    # A HN trained with a whitened input carries a fixed "whiten" buffer
+    # (profile_dim, k); the trunk then sees k dims, but the HN still takes
+    # raw profile_dim-dimensional profiles.
+    whiten = sd.get("whiten")
+    if whiten is not None:
+        profile_dim = whiten.shape[0]
+        assert context_dim == whiten.shape[1] + emb_l + emb_t, \
+            (context_dim, whiten.shape, emb_l, emb_t)
+    else:
+        profile_dim = context_dim - emb_l - emb_t
     return dict(
         num_layers=L,
         layer_types=layer_types,
         dims={k: [sd[f"B.{k}"].shape[1], sd[f"A.{k}"].shape[2]] for k in layer_types},
         emb_l_dim=emb_l,
         emb_t_dim=emb_t,
-        profile_dim=context_dim - emb_l - emb_t,
+        profile_dim=profile_dim,
         rank=rank,
         head_in_dim=sd["mlp3.layers.4.weight"].shape[0],
+        whiten=whiten,
     )
 
 
@@ -93,10 +104,12 @@ def load_hypernetwork(ckpt_path: str, device: str, hn_module: str = HN_MODULE):
                                         weights_only=False))
     cfg = _infer_hn_config(sd)
     hn = HyperNetwork(**cfg).to(device)
-    hn.load_state_dict(sd, strict=False)                     # strict: catches config mismatch
+    result = hn.load_state_dict(sd, strict=True)             # strict: catches config mismatch
+    assert not result.missing_keys and not result.unexpected_keys, result
     hn.eval()
     print(f"[HN] {ckpt_path}: L={cfg['num_layers']} types={cfg['layer_types']} "
-          f"dims={cfg['dims']} rank={cfg['rank']} head_in={cfg['head_in_dim']}")
+          f"dims={cfg['dims']} rank={cfg['rank']} head_in={cfg['head_in_dim']} "
+          f"input={'whitened ' + str(tuple(cfg['whiten'].shape)) if cfg['whiten'] is not None else 'raw'}")
 
     @torch.no_grad()
     def act(profiles):

@@ -23,7 +23,7 @@ EPISODES_PER_WORKER = args.episodes_per_worker
 # ── Config ────────────────────────────────────────────────────────────────────
 DEVICE          = "cuda:0"
 LUSTRE          = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf"
-CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_pathwise_v6"   # v5 = entropy floor, v6 = + whitened input
+CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_pathwise_v5_whitened"   # v5 = entropy floor, v6 = + whitened input
 
 NUM_LAYERS      = 32
 LAYER_TYPES     = ["q", "v"]
