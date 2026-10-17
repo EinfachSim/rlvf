@@ -368,10 +368,14 @@ class EnvWorker:
                 "pmax": float(norm.max(dim=-1).values.mean().item()),
             }
 
+    def _answered_profile(self, answers):
+        """answers (57,) -> ipsatized answered profile p_hat (19,). Differentiable."""
+        dim_means = answers[self._scoring_idx].mean(dim=1) # (19,)
+        return dim_means - answers.mean()
+
     def _score_torch(self, answers, profile_t):
         """Differentiable port of the numpy scoring. answers (57,), profile (19,)."""
-        dim_means = answers[self._scoring_idx].mean(dim=1) # (19,)
-        answered_profile = dim_means - answers.mean()
+        answered_profile = self._answered_profile(answers)
         return -((answered_profile - profile_t) ** 2).mean()
 
     def _score(self, answers, profile) -> float:
@@ -444,6 +448,7 @@ class EnvWorker:
             profile_t = torch.tensor(profile, device=self.device,
                                      dtype=torch.float32)
             score = float(self._score_torch(answers, profile_t).item())
+            p_hat = self._answered_profile(answers).cpu().numpy().tolist()
             # discrete-argmax score for logging
             disc = (norm.argmax(dim=-1).float() + 1.0)
             score_disc = float(self._score_torch(disc, profile_t).item())
@@ -461,6 +466,7 @@ class EnvWorker:
                 "score_disc": score_disc, "reward": reward,
                 "digit_mass": digit_mass, "delta_w_frobenius": delta_fro,
                 "entropy": dstats["entropy"], "pmax": dstats["pmax"],
+                "p_hat": p_hat,
                 "d_abs_mean": float(d.abs().mean().item()),
                 "b_abs_mean": float(torch.cat(
                     [v.flatten() for v in b.values()]).abs().mean().item()),
@@ -546,6 +552,7 @@ class EnvWorker:
                 (-score_t).backward()
                 g_ans = ans_leaf.grad.detach() # (57,)
                 score = float(score_t.item())
+                info["p_hat"] = self._answered_profile(answers).cpu().numpy().tolist()
                 # PASS 2: chunked re-forward WITH grad; exact chain rule.
                 # The score renormalizes by digit mass, making it invariant to
                 # mass, which is why mass penalty is needed
@@ -583,6 +590,7 @@ class EnvWorker:
                 a_idx = torch.multinomial(samp_p, 1).squeeze(-1) # (57,) in 0..5
                 a_val = a_idx.float() + 1.0
                 score = float(self._score_torch(a_val, profile_t).item())
+                info["p_hat"] = self._answered_profile(a_val).cpu().numpy().tolist()
 
                 # LOO baselines
                 with torch.no_grad():
@@ -689,25 +697,3 @@ class EnvWorker:
 
     def run_episodes_grad_serial(self, episodes: list[dict]) -> list[dict]:
         return [self.run_episode_grad(**ep) for ep in episodes]
-
-
-    #diagnostic for collapse:
-
-    def answers(self, b_np, d_np, A_np, B_np) -> dict:
-        """Per-item answer diagnostics for one adapter (no reward, no grad)."""
-        b = {k: torch.tensor(v, device=self.device, dtype=torch.float32)
-             for k, v in b_np.items()}
-        d = torch.tensor(d_np, device=self.device, dtype=torch.float32)
-        A = {k: torch.tensor(v, dtype=torch.float32) for k, v in A_np.items()}
-        B = {k: torch.tensor(v, dtype=torch.float32) for k, v in B_np.items()}
-        try:
-            self._apply_vera(b, d)
-            answers, digit_mass, norm = self._answer_questionnaire()
-            return {
-                "expected": answers.cpu().numpy(),                 # (57,) E[k]
-                "argmax":   (norm.argmax(-1) + 1).cpu().numpy(),   # (57,) in 1..6
-                "pmax":     norm.max(-1).values.cpu().numpy(),     # (57,) max prob over digits
-                "digit_mass": digit_mass,
-            }
-        finally:
-            self._remove_adapter()

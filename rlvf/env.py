@@ -57,6 +57,7 @@ class RLVFEnv(BaseEnv):
         self.last_delta_fro = None
         self.last_entropy = None   # mean entropy (nats) of the 6-digit answer dists
         self.last_pmax = None      # mean max-prob over the 6 digits (1.0 = one-hot)
+        self.last_p_hat = None     # (n, 19) answered profiles of the last pool call
         self.last_errors = 0
 
         # Frozen VeRA matrices: kept here for reference, shipped to the
@@ -117,22 +118,26 @@ class RLVFEnv(BaseEnv):
     def eval_batch(
         self,
         action_batch: torch.Tensor,
-        profiles=None
+        profiles: torch.Tensor = None,
+        tag: str = "EVAL",
     ) -> dict:
         """
-        Run a batch of episodes on the fixed eval profiles.
-        Returns diagnostics dict
+        Run a batch of episodes on a fixed set of eval profiles.
+        `profiles` must be the SAME profiles the actions were generated from
+        (default: self.eval_profiles). Returns diagnostics dict.
         """
-        assert action_batch[1].shape[0] == len(self.eval_profiles), \
-            f"eval action_batch must have {len(self.eval_profiles)} rows"
+        if profiles is None:
+            profiles = self.eval_profiles
+        assert action_batch[1].shape[0] == len(profiles), \
+            f"eval action_batch must have {len(profiles)} rows"
 
-        if profiles == "zero_mean":
-            eval_profiles = self.eval_profiles_zero_mean
-        else: eval_profiles = self.eval_profiles
-        rewards = self._run_pool(
-            action_batch, eval_profiles, tag="EVAL"
-        )
+        rewards = self._run_pool(action_batch, profiles, tag=tag)
+        align = self.alignment_stats(profiles)
         return {
+            "eval_align_cross":  align["cross"],
+            "eval_r2_mean":      align["r2_mean"],
+            "eval_r2_max":       align["r2_max"],
+            "eval_phat_var":     align["phat_var"],
             "eval_reward_mean": rewards.mean().item(),
             "eval_reward_std":  rewards.std().item(),
             "eval_reward_min":  rewards.min().item(),
@@ -203,6 +208,7 @@ class RLVFEnv(BaseEnv):
         self.last_pmax = torch.tensor(
             [r.get("pmax", float("nan")) for r in results],
             dtype=torch.float32)
+        self.last_p_hat = self._stack_p_hat(results)
         self.last_errors = int((~ok).sum().item())
 
         self._log(results, f"GRAD:{mode}")
@@ -267,10 +273,56 @@ class RLVFEnv(BaseEnv):
         self.last_pmax = torch.tensor(
             [r.get("pmax", float("nan")) for r in results],
             dtype=torch.float32)
+        self.last_p_hat = self._stack_p_hat(results)
         self.last_errors = sum(1 for r in results if "error" in r)
 
         self._log(results, tag)
         return rewards
+
+    # ── Alignment diagnostics ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _stack_p_hat(results) -> torch.Tensor:
+        """(n, 19) answered profiles; NaN rows for failed episodes."""
+        rows = []
+        for r in results:
+            ph = r.get("p_hat")
+            rows.append(torch.tensor(ph, dtype=torch.float32) if ph is not None
+                        else torch.full((19,), float("nan")))
+        return torch.stack(rows)
+
+    def alignment_stats(self, profiles: torch.Tensor) -> dict:
+        """
+        How much of the answered profile tracks the target, across the batch.
+        Uses self.last_p_hat from the most recent pool call.
+          cross    : mean_j mean_n p_hat[n,j] * p[n,j]  -- 0 for ANY constant
+                     predictor, > 0 as soon as the HN tracks anything. Note
+                     score = -(E[p_hat^2] + E[p^2] - 2*cross).
+          r2_j     : corr(p_hat[:,j], p[:,j])^2 across the batch, per value.
+          phat_var : mean_j Var_n p_hat[n,j]  -- spread of answered profiles
+                     across the batch (0 for a constant predictor).
+        """
+        ph = self.last_p_hat
+        p = profiles.to(ph.dtype)
+        ok = ~torch.isnan(ph).any(dim=1)
+        ph, p = ph[ok], p[ok]
+        if ph.shape[0] < 3:
+            nan = float("nan")
+            return {"cross": nan, "r2_mean": nan, "r2_max": nan,
+                    "phat_var": nan, "r2_per_value": [nan] * 19}
+        cross = float((ph * p).mean().item())
+        phc = ph - ph.mean(0, keepdim=True)
+        pc = p - p.mean(0, keepdim=True)
+        num = (phc * pc).sum(0)
+        den = (phc.pow(2).sum(0) * pc.pow(2).sum(0)).sqrt().clamp_min(1e-12)
+        r2 = (num / den).pow(2)                      # (19,)
+        return {
+            "cross": cross,
+            "r2_mean": float(r2.mean().item()),
+            "r2_max": float(r2.max().item()),
+            "phat_var": float(ph.var(0).mean().item()),
+            "r2_per_value": r2.tolist(),
+        }
 
     def _build_payloads(
         self,
