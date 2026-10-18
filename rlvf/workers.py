@@ -94,11 +94,15 @@ class EnvWorker:
                   for k, v in B_np.items()}
         self._A_cpu = {k: v.cpu() for k, v in self.A.items()}
         self._B_cpu = {k: v.cpu() for k, v in self.B.items()}
+        # Rank is taken from A/B (RANK above is only the training default); the
+        # hooks and gradients are rank-agnostic, which the adapter-capacity
+        # oracle (oracle_capacity.py) relies on.
+        self.rank = int(self.A[LAYER_TYPES[0]].shape[1])
         for t in LAYER_TYPES:
             assert self.A[t].shape[0] == len(TARGET_LAYERS) and \
-                   self.A[t].shape[1] == RANK, f"A[{t}] has shape {tuple(self.A[t].shape)}"
+                   self.A[t].shape[1] == self.rank, f"A[{t}] has shape {tuple(self.A[t].shape)}"
             assert self.B[t].shape[0] == len(TARGET_LAYERS) and \
-                   self.B[t].shape[2] == RANK, f"B[{t}] has shape {tuple(self.B[t].shape)}"
+                   self.B[t].shape[2] == self.rank, f"B[{t}] has shape {tuple(self.B[t].shape)}"
         print(f"[EnvWorker] Cached frozen VeRA A/B: "
               + ", ".join(f"A[{t}]={tuple(self.A[t].shape)} B[{t}]={tuple(self.B[t].shape)}"
                           for t in LAYER_TYPES))
