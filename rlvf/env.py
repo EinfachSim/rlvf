@@ -2,7 +2,7 @@ import torch
 import ray
 from ray.util.actor_pool import ActorPool
 from abc import ABC, abstractmethod
-from rlvf.data import ValueProfileSampler
+from rlvf.data import ValueProfileSampler, mahalanobis_weight
 from rlvf.workers import EnvWorker
 
 class BaseEnv(ABC):
@@ -36,7 +36,14 @@ class RLVFEnv(BaseEnv):
         verbose: bool = False,
         train_means=None,          # None -> zero-mean (uniform coverage of profile space)
         eval_means="empirical",    # "empirical" -> population prior (Schwartz & Cieciuch 2022, Table 5)
+        rec_mode: str = "mse",     # "mse" | "mahalanobis": reconstruction objective for gradients
+        mahal_cap: float = 10.0,   # max weight ratio weak/strong direction (None = uncapped)
     ):
+        assert rec_mode in ("mse", "mahalanobis"), rec_mode
+        self.rec_mode = rec_mode
+        self.rec_weight = mahalanobis_weight(cap=mahal_cap) if rec_mode == "mahalanobis" else None
+        print(f"[RLVFEnv] Reconstruction objective: {rec_mode}"
+              + (f" (cap={mahal_cap})" if rec_mode == "mahalanobis" else ""))
         self.num_workers = num_workers
         self.episodes_per_worker = episodes_per_worker
         if not batch_size:
@@ -93,7 +100,7 @@ class RLVFEnv(BaseEnv):
               f"(batch_size={self.batch_size}, "
               f"Approx. {self.batch_size // num_workers} episodes/worker)...")
         self.pool = ActorPool([
-            EnvWorker.remote(A_np, B_np) for _ in range(num_workers)
+            EnvWorker.remote(A_np, B_np, self.rec_weight) for _ in range(num_workers)
         ])
         print("[RLVFEnv] All workers ready.")
 

@@ -15,6 +15,9 @@ parser.add_argument("--init_from", type=str, default="",
                     help="path to a pathwise checkpoint to warm-start from")
 parser.add_argument("--checkpoint_dir", type=str, default="",
                     help="path to a token_pg checkpoint to resume training from")
+parser.add_argument("--rec_mode", choices=["mse", "mahalanobis"], default="mse",
+                    help="objective used as the PG reward; logged scores stay plain MSE")
+parser.add_argument("--mahal_cap", type=float, default=10.0)
 args = parser.parse_args()
 
 NUM_WORKERS         = args.num_workers
@@ -33,7 +36,7 @@ RANK            = 8
 WHITEN_INPUT    = True    # cold start: whiten the profile input (must match the pathwise runs
                           # you compare against); warm start: inherited from the checkpoint
 
-LR              = 1e-4
+LR              = 3e-5
 GRAD_CLIP       = 1.0
 BATCH_SIZE      = 64
 KL_WEIGHT       = 0.1 #for generation-keeping
@@ -42,7 +45,7 @@ ENT_COEF        = 0.0 #not used (linear entropy bonus)
 # Entropy floor on the 6-digit answer distributions, same as in pathwise:
 # guards against pi_i collapsing to one-hot (zero policy gradient, zero
 # LOO advantage). Only active below H_MIN.
-ENT_FLOOR_COEF  = 1.0
+ENT_FLOOR_COEF  = 0.1
 H_MIN           = 0.5
 TEMPERATURE     = 1.0
 
@@ -61,6 +64,7 @@ wandb.init(
         "kl_weight": KL_WEIGHT, "tok_kl_weight": TOK_KL_WEIGHT,
         "ent_coef": ENT_COEF, "temperature": TEMPERATURE,
         "whiten_input": WHITEN_INPUT, "init_from": args.init_from,
+        "rec_mode": args.rec_mode, "mahal_cap": args.mahal_cap,
         "ent_floor_coef": ENT_FLOOR_COEF, "h_min": H_MIN,
         "total_steps": TOTAL_STEPS, "trainer": "token_pg",
     },
@@ -136,6 +140,7 @@ env = RLVFEnv(
     layer_types=len(LAYER_TYPES), rank=RANK, num_layers=NUM_LAYERS,
     train_means=None,          # zero-mean: uniform coverage of the profile space
     eval_means="empirical",    # population prior (Schwartz & Cieciuch 2022, Table 5)
+    rec_mode=args.rec_mode, mahal_cap=args.mahal_cap,
 )
 for _ in range(start_step):            # continue the profile stream on resume
     env.train_sampler.sample_batch(env.batch_size)

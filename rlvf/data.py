@@ -108,6 +108,34 @@ def whitening_matrix(corr=None, sd=PROFILE_SD, eps=1e-6):
     return W.astype(np.float32)          # (19, 18)
 
 
+def mahalanobis_weight(corr=None, sd=PROFILE_SD, cap=10.0, eps=1e-6):
+    """
+    Symmetric PSD matrix M (19, 19) for the reweighted reconstruction loss
+        L_rec = (1/19) (p_hat - p)^T M (p_hat - p).
+    M is the (capped) pseudo-inverse of the training covariance of the
+    ipsatized profiles: along eigen-direction k the residual is weighted by
+    1 / max(lambda_k, lambda_max / cap), so weak directions get at most `cap`
+    times the weight of the strongest one. The null direction removed by
+    ipsatization is dropped. M is rescaled so that E[p^T M p] = E[p^T p] under
+    the training sampler: the loss has the same magnitude as the plain MSE on
+    average, only its distribution across directions changes. cap=None -> exact
+    Mahalanobis (no capping).
+    """
+    corr = _nearest_corr(EMPIRICAL_CORR if corr is None else np.asarray(corr))
+    n = corr.shape[0]
+    C = np.eye(n) - np.full((n, n), 1.0 / n)
+    cov = C @ (corr * sd ** 2) @ C.T
+    w, V = np.linalg.eigh(cov)
+    keep = w > eps * w.max()
+    w, V = w[keep], V[:, keep]
+    floor = w.max() / cap if cap is not None else 0.0
+    inv = 1.0 / np.maximum(w, floor)
+    M = (V * inv) @ V.T
+    # E[p^T M p] = tr(M cov) = sum_k w_k * inv_k ; E[p^T p] = tr(cov) = sum_k w_k
+    M *= w.sum() / (w * inv).sum()
+    return M.astype(np.float32)
+
+
 class ValueProfileSampler:
     """
     Samples synthetic PVQ-RR value profiles (centered / ipsatized scores).

@@ -65,14 +65,28 @@ SCORING_KEY = {
 
 @ray.remote(num_gpus=1, num_cpus=8)
 class EnvWorker:
-    def __init__(self, A_np: dict, B_np: dict):
+    def __init__(self, A_np: dict, B_np: dict, rec_weight_np=None):
         """
         A_np / B_np: the frozen VeRA matrices as numpy arrays,
             {"q": (L, rank, d_in), "v": ...} and {"q": (L, d_out, rank), "v": ...}.
         Shipped once at construction and cached on the GPU in fp32; episodes
         only carry the per-adapter (b, d).
+        rec_weight_np: optional (19, 19) PSD matrix M for the reconstruction
+            objective used for GRADIENTS, L_rec = (1/19) r^T M r with
+            r = p_hat - p (data.mahalanobis_weight). None -> plain MSE (M = I).
+            All logged scores remain the plain MSE regardless.
         """
         self.device = "cuda:0"
+
+        self._rec_weight = None
+        if rec_weight_np is not None:
+            self._rec_weight = torch.tensor(rec_weight_np, device=self.device,
+                                            dtype=torch.float32)
+            print("[EnvWorker] Reconstruction objective: weighted (Mahalanobis), "
+                  f"weight eigenvalues in [{np.linalg.eigvalsh(rec_weight_np).min():.2f}, "
+                  f"{np.linalg.eigvalsh(rec_weight_np).max():.2f}]")
+        else:
+            print("[EnvWorker] Reconstruction objective: plain MSE")
 
         self.A = {k: torch.tensor(v, device=self.device, dtype=torch.float32)
                   for k, v in A_np.items()}
@@ -374,9 +388,19 @@ class EnvWorker:
         return dim_means - answers.mean()
 
     def _score_torch(self, answers, profile_t):
-        """Differentiable port of the numpy scoring. answers (57,), profile (19,)."""
+        """Differentiable port of the numpy scoring. answers (57,), profile (19,).
+        Always the plain MSE: this is the reported metric."""
         answered_profile = self._answered_profile(answers)
         return -((answered_profile - profile_t) ** 2).mean()
+
+    def _objective_torch(self, answers, profile_t):
+        """Reconstruction objective used for GRADIENTS (to be maximized, like
+        the score). Plain MSE unless a weight matrix M was given at init, in
+        which case -(1/19) r^T M r with r = p_hat - p."""
+        if self._rec_weight is None:
+            return self._score_torch(answers, profile_t)
+        r = self._answered_profile(answers) - profile_t
+        return -(r @ self._rec_weight @ r) / r.shape[0]
 
     def _score(self, answers, profile) -> float:
         answered = np.asarray(answers, dtype=float)
@@ -546,12 +570,14 @@ class EnvWorker:
             answers, digit_mass, norm = self._answer_questionnaire()
 
             if mode == "pathwise":
-                # d(-score)/d(answers) on a tiny 57-dim graph
+                # d(-objective)/d(answers) on a tiny 57-dim graph; the logged
+                # score is always the plain MSE.
                 ans_leaf = answers.detach().clone().requires_grad_(True)
-                score_t = self._score_torch(ans_leaf, profile_t)
-                (-score_t).backward()
+                obj_t = self._objective_torch(ans_leaf, profile_t)
+                (-obj_t).backward()
                 g_ans = ans_leaf.grad.detach() # (57,)
-                score = float(score_t.item())
+                score = float(self._score_torch(answers, profile_t).item())
+                info["objective"] = float(obj_t.item())
                 info["p_hat"] = self._answered_profile(answers).cpu().numpy().tolist()
                 # PASS 2: chunked re-forward WITH grad; exact chain rule.
                 # The score renormalizes by digit mass, making it invariant to
@@ -590,9 +616,11 @@ class EnvWorker:
                 a_idx = torch.multinomial(samp_p, 1).squeeze(-1) # (57,) in 0..5
                 a_val = a_idx.float() + 1.0
                 score = float(self._score_torch(a_val, profile_t).item())
+                obj = float(self._objective_torch(a_val, profile_t).item())
+                info["objective"] = obj
                 info["p_hat"] = self._answered_profile(a_val).cpu().numpy().tolist()
 
-                # LOO baselines
+                # LOO baselines (under the same objective as the reward)
                 with torch.no_grad():
                     baselines = torch.zeros(n_items, device=self.device)
                     for i in range(n_items):
@@ -600,9 +628,9 @@ class EnvWorker:
                         for v in range(6):
                             ans_v = a_val.clone()
                             ans_v[i] = float(v + 1)
-                            s_i[v] = self._score_torch(ans_v, profile_t)
+                            s_i[v] = self._objective_torch(ans_v, profile_t)
                         baselines[i] = (samp_p[i] * s_i).sum()
-                    adv = score - baselines # (57,)
+                    adv = obj - baselines # (57,)
                 info["adv_std"] = float(adv.std().item())
 
                 # second pass chunked, policy-gradient + entropy + per-answer KL

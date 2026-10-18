@@ -13,8 +13,14 @@ parser.add_argument("--num_workers", type=int, default=2)
 parser.add_argument("--episodes_per_worker", type=int, default=16)
 parser.add_argument("--init_from", type=str, default="",
                     help="optional checkpoint to warm-start the HN weights from "
-                         "(optimizer state is NOT restored, step counter starts at 0). "
-                         "Use a pre-saturation checkpoint, e.g. v4 step 20-25.")
+                         "(optimizer state is NOT restored, step counter starts at 0).")
+parser.add_argument("--checkpoint_dir", type=str, default="checkpoints_pathwise_v6",
+                    help="checkpoint directory under LUSTRE (auto-resumes from its latest file)")
+parser.add_argument("--run_name", type=str, default="mistral-7b-hypernetwork-pathwise-v6-whitened")
+parser.add_argument("--rec_mode", choices=["mse", "mahalanobis"], default="mse",
+                    help="reconstruction objective used for gradients; logged scores stay plain MSE")
+parser.add_argument("--mahal_cap", type=float, default=10.0,
+                    help="Mahalanobis: max weight ratio between weakest and strongest direction")
 args = parser.parse_args()
 
 NUM_WORKERS         = args.num_workers
@@ -23,7 +29,7 @@ EPISODES_PER_WORKER = args.episodes_per_worker
 # ── Config ────────────────────────────────────────────────────────────────────
 DEVICE          = "cuda:0"
 LUSTRE          = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf"
-CHECKPOINT_DIR  = f"{LUSTRE}/checkpoints_pathwise_v6"   # v5 = entropy floor, v6 = + whitened input
+CHECKPOINT_DIR  = f"{LUSTRE}/{args.checkpoint_dir}"   # v5 = entropy floor, v6 = + whitened input
 
 NUM_LAYERS      = 32
 LAYER_TYPES     = ["q", "v"]
@@ -51,13 +57,14 @@ SAVE_EVERY      = 5
 print("Initializing Weights & Biases...")
 wandb.init(
     project="rlvf-pvq-alignment",
-    name="mistral-7b-hypernetwork-pathwise-v6-whitened",
+    name=args.run_name,
     config={
         "num_layers": NUM_LAYERS, "layer_types": LAYER_TYPES, "rank": RANK,
         "lr": LR, "grad_clip": GRAD_CLIP, "batch_size": BATCH_SIZE,
         "kl_weight": KL_WEIGHT, "mass_coef": MASS_COEF,
         "ent_floor_coef": ENT_FLOOR_COEF, "h_min": H_MIN,
         "whiten_input": WHITEN_INPUT,
+        "rec_mode": args.rec_mode, "mahal_cap": args.mahal_cap,
         "total_steps": TOTAL_STEPS, "init_from": args.init_from,
         "trainer": "pathwise",
     },
@@ -117,6 +124,7 @@ env = RLVFEnv(
     layer_types=len(LAYER_TYPES), rank=RANK, num_layers=NUM_LAYERS,
     train_means=None,          # zero-mean: uniform coverage of the profile space
     eval_means="empirical",    # population prior (Schwartz & Cieciuch 2022, Table 5)
+    rec_mode=args.rec_mode, mahal_cap=args.mahal_cap,
 )
 # On resume, advance the training sampler past the batches already consumed so
 # the profile stream continues instead of replaying from the seed. (The eval
@@ -171,6 +179,8 @@ try:
                                   for r in res["results"]])
         ent_pens = torch.tensor([r.get("ent_penalty", float("nan"))
                                  for r in res["results"]])
+        objs = torch.tensor([r.get("objective", float("nan"))
+                             for r in res["results"]])
         score_disc = torch.tensor([r.get("score_disc", float("nan"))
                                    for r in res["results"]])
         align = env.alignment_stats(states.cpu())
@@ -192,6 +202,7 @@ try:
             "train/score_disc_mean": float(score_disc[ok].nanmean().item()),
             "train/mass_penalty": float(mass_pens[ok].nanmean().item()),
             "train/ent_penalty":  float(ent_pens[ok].nanmean().item()),
+            "train/objective":    float(objs[ok].nanmean().item()),   # == score for rec_mode=mse
             "train/entropy":      float(env.last_entropy[ok].nanmean().item()),
             "train/pmax":         float(env.last_pmax[ok].nanmean().item()),
             "train/score_mean":  float(env.last_scores.mean().item()),
