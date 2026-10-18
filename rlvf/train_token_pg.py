@@ -33,7 +33,7 @@ RANK            = 8
 WHITEN_INPUT    = True    # cold start: whiten the profile input (must match the pathwise runs
                           # you compare against); warm start: inherited from the checkpoint
 
-LR              = 3e-5
+LR              = 1e-4
 GRAD_CLIP       = 1.0
 BATCH_SIZE      = 64
 KL_WEIGHT       = 0.1 #for generation-keeping
@@ -42,7 +42,7 @@ ENT_COEF        = 0.0 #not used (linear entropy bonus)
 # Entropy floor on the 6-digit answer distributions, same as in pathwise:
 # guards against pi_i collapsing to one-hot (zero policy gradient, zero
 # LOO advantage). Only active below H_MIN.
-ENT_FLOOR_COEF  = 0.1
+ENT_FLOOR_COEF  = 1.0
 H_MIN           = 0.5
 TEMPERATURE     = 1.0
 
