@@ -190,8 +190,8 @@ def main():
     if len(lens) > 1:
         print("  WARNING: candidates differ in token count -> summed log-lik is "
               "length-biased; consider comparing first-token logprobs only.")
-    from runners import build_chat_ids, AITA_INSTRUCTION
-    demo = build_chat_ids(tok, AITA_INSTRUCTION.format(post="<POST>"), None, 2048)
+    from runners import build_chat_ids
+    demo = build_chat_ids(tok, runner.instruction.format(post="<POST>"), None, 2048)
     print("  prompt tail:", repr(tok.decode(demo[-30:])))
 
     # 2. base model distribution

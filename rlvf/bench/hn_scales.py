@@ -3,7 +3,7 @@ Print the size of the b/d vectors each HN produces, to set the random
 condition's --random_b_scale / --random_d_scale. CPU only.
 
 Run from the bench folder:
-  python hn_scales.py --hn_module rlvf.hypernetwork \
+  python hn_scales.py --hn_module rlvf.model \
       --ckpt pathwise=/path/pathwise.pt warmstart=/path/warm.pt coldstart=/path/cold.pt
 """
 import argparse
@@ -14,7 +14,7 @@ from aita_eval import load_hypernetwork
 from rlvf.data import ValueProfileSampler
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--hn_module", default="rlvf.hypernetwork")
+ap.add_argument("--hn_module", default="rlvf.model")
 ap.add_argument("--ckpt", nargs="+", required=True, help="name=path ...")
 args = ap.parse_args()
 

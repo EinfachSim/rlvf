@@ -1,24 +1,26 @@
 """
-Evaluation across all conditions, on AITA (behaviour) or PVQ-RR (the
+Evaluation across conditions, on AITA (behaviour; methodology adapted from
+Nie et al. 2025, arXiv:2508.11414 -- see aita_metrics.py) or PVQ-RR (the
 questionnaire the HNs were trained on).
 
-Conditions (each runs on its own GPU worker, all on the SAME profiles/tasks):
-  base       plain base model, no conditioning (reference)
+Conditions (all on the SAME profiles and tasks; any number of GPUs):
+  base       plain base model, no conditioning (run once, profile-independent)
   prompted   base model, profile rendered into the prompt (no adapter)
-  random     random VeRA A/B and random b, d per profile
-  warmstart  HN from --ckpt_warmstart
-  coldstart  HN from --ckpt_coldstart
-  pathwise   HN from --ckpt_pathwise
+  random     random VeRA A/B and random b, d per profile, scale-matched to an HN
+  <name>     any HN checkpoint, given as --hn <name>=<path> (repeatable);
+             legacy --ckpt_pathwise / --ckpt_warmstart / --ckpt_coldstart work too
+Every conditioned condition also runs once with the neutral profile p = 0,
+the reference for the probability gain.
 
-Usage:
-  python aita_eval.py --benchmark aita --dataset /path/aita.json \
-      --ckpt_warmstart ... --ckpt_coldstart ... --ckpt_pathwise ... --seed 1234
-  python aita_eval.py --benchmark pvq \
-      --ckpt_warmstart ... --ckpt_coldstart ... --ckpt_pathwise ... --seed 1234
+Usage (from the bench folder, rlvf importable):
+  python aita_eval.py --benchmark aita --dataset /path/aita_dataset_10_values_reduced.json \
+      --hn pathwise=/path/hn_step_00215.pt --seed 1234
+  python aita_eval.py --benchmark pvq --hn pathwise=/path/hn_step_00215.pt --seed 1234
 
-  --seed 1234: eval profiles the HNs never saw (training used 42 and 43).
+  --seed 1234: eval profiles the HNs never saw (training eval used 42 / 43).
 Smoke run (plumbing only):
-  python aita_eval.py --benchmark pvq --conditions base prompted --eval_size 4
+  python aita_eval.py --benchmark aita --dataset ... --conditions base prompted \
+      --eval_size 4 --posts_per_side 2 --n_boot 200
 """
 import argparse
 import json
@@ -32,14 +34,14 @@ import torch
 from env import AITAEnv, PVQEnv
 from workers import MODEL_PATH, TARGET_LAYERS, LAYER_TYPES, RANK
 
-HN_CONDITIONS = ("warmstart", "coldstart", "pathwise")
-ALL_CONDITIONS = ("base", "prompted", "random") + HN_CONDITIONS
+FIXED_CONDITIONS = ("base", "prompted", "random")
+LEGACY_HN = ("warmstart", "coldstart", "pathwise")
 
 
 # ── Hypernetwork loading ──────────────────────────────────────────────────────
 
 # Where your HyperNetwork class lives (override with --hn_module).
-HN_MODULE = "rlvf.hypernetwork"
+HN_MODULE = "rlvf.model"
 
 # Keys under which a state_dict may be nested inside a checkpoint dict.
 _STATE_KEYS = ("model_state_dict", "state_dict", "hn_state_dict", "model", "hn")
@@ -170,18 +172,33 @@ def main():
     ap.add_argument("--dataset", help="AITA json (needed for --benchmark aita)")
     ap.add_argument("--quest_path", default=None,
                     help="PVQ-RR questionnaire.txt (default: training path)")
-    ap.add_argument("--conditions", nargs="+", default=list(ALL_CONDITIONS),
-                    choices=ALL_CONDITIONS)
-    ap.add_argument("--ckpt_warmstart")
-    ap.add_argument("--ckpt_coldstart")
-    ap.add_argument("--ckpt_pathwise")
+    ap.add_argument("--hn", action="append", default=[], metavar="NAME=PATH",
+                    help="HN checkpoint condition (repeatable)")
+    for c in LEGACY_HN:
+        ap.add_argument(f"--ckpt_{c}", help=f"same as --hn {c}=PATH")
+    ap.add_argument("--conditions", nargs="+", default=None,
+                    help="default: base prompted random + every --hn")
+    ap.add_argument("--num_workers", type=int, default=None,
+                    help="GPU workers (default: all GPUs, at most one per condition)")
     ap.add_argument("--eval_size", type=int, default=64)
-    ap.add_argument("--posts_per_side", type=int, default=10,
-                    help="per value: this many posts where high-value says YTA, and as many where it says NTA")
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--posts_per_side", type=int, default=25,
+                    help="per value: this many posts where the low standard is the harsher "
+                         "verdict, and as many where it is the milder one")
+    ap.add_argument("--verdicts", choices=["ternary", "binary"], default="ternary",
+                    help="ternary = YTA/NTA/Neutral as in Nie et al. 2025")
+    ap.add_argument("--scoring", choices=["sequence", "first_token"], default="sequence",
+                    help="sequence = full-verdict log-likelihood; first_token = the paper's "
+                         "next-token probability (check the printed tokenization first)")
+    ap.add_argument("--n_boot", type=int, default=2000)
+    ap.add_argument("--compare_to", default="prompted",
+                    help="paired mean_r differences of every condition against this one")
+    ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--eval_means", choices=["empirical", "zero"], default="empirical",
                     help="profile prior for the eval set: 'empirical' = population means "
                          "(Schwartz & Cieciuch 2022, Table 5), 'zero' = uniform coverage")
+    ap.add_argument("--random_match", default=None,
+                    help="HN condition whose b/d statistics the random condition copies "
+                         "(default: the first HN); 'none' = use the scales below")
     ap.add_argument("--random_b_scale", type=float, default=1.0)
     ap.add_argument("--random_d_scale", type=float, default=0.1)
     ap.add_argument("--random_d_mean", type=float, default=0.0)
@@ -191,39 +208,55 @@ def main():
                     help="output dir (default: results/<benchmark>)")
     args = ap.parse_args()
 
-    for c in args.conditions:
-        if c in HN_CONDITIONS and getattr(args, f"ckpt_{c}") is None:
-            ap.error(f"condition '{c}' needs --ckpt_{c}")
-
+    hns = {}
+    for item in args.hn:
+        name, path = item.split("=", 1)
+        assert name not in FIXED_CONDITIONS, f"HN name {name!r} is reserved"
+        hns[name] = path
+    for c in LEGACY_HN:
+        if getattr(args, f"ckpt_{c}"):
+            hns[c] = getattr(args, f"ckpt_{c}")
+    conditions = args.conditions or (list(FIXED_CONDITIONS) + list(hns))
+    for c in conditions:
+        if c not in FIXED_CONDITIONS and c not in hns:
+            ap.error(f"condition {c!r} needs --hn {c}=PATH")
     if args.benchmark == "aita" and not args.dataset:
         ap.error("--benchmark aita needs --dataset")
     args.out = args.out or f"results/{args.benchmark}"
 
     ray.init()
-    common = dict(worker_types=args.conditions, eval_size=args.eval_size,
-                  rng_seed=args.seed,
+    common = dict(worker_types=conditions, eval_size=args.eval_size,
+                  rng_seed=args.seed, num_workers=args.num_workers,
                   eval_means=None if args.eval_means == "zero" else "empirical")
     if args.benchmark == "aita":
-        env = AITAEnv(dataset_path=args.dataset,
-                      posts_per_side=args.posts_per_side, **common)
+        env = AITAEnv(dataset_path=args.dataset, posts_per_side=args.posts_per_side,
+                      verdicts=args.verdicts, scoring=args.scoring,
+                      n_boot=args.n_boot, compare_to=args.compare_to, **common)
     else:
         env = PVQEnv(quest_path=args.quest_path, **common)
-    profiles = env.get_observation_batch()            # (N, 19), fixed by seed
+    profiles = env.action_profiles            # (N + 1, 19): eval profiles + neutral reference
 
     # Build each condition's adapters on the driver (HNs are small).
     actions, frozen = {}, {}
-    for c in args.conditions:
-        if c in ("base", "prompted"):
-            actions[c] = None
-        elif c == "random":
-            actions[c], frozen[c] = make_random_condition(
-                len(profiles), args.seed, args.random_b_scale, args.random_d_scale,
-                args.random_d_mean)
+    for c in conditions:
+        if c in hns:
+            act, A, B = load_hypernetwork(hns[c], "cpu", args.hn_module)
+            actions[c], frozen[c] = act(profiles), (A, B)
         else:
-            act, A, B = load_hypernetwork(getattr(args, f"ckpt_{c}"), "cpu",
-                                          args.hn_module)
-            actions[c] = act(profiles)
-            frozen[c] = (A, B)
+            actions[c] = None
+    if "random" in conditions:
+        match = args.random_match or next(iter(hns), "none")
+        if match != "none":
+            b, d = actions[match]
+            b_all = torch.cat([v.flatten() for v in b.values()])
+            args.random_b_scale, args.random_d_mean, args.random_d_scale = \
+                float(b_all.std()), float(d.mean()), float(d.std())
+            print(f"[random] matched to {match}: b~N(0,{args.random_b_scale:.3f}^2), "
+                  f"d~N({args.random_d_mean:.3f},{args.random_d_scale:.3f}^2)")
+        actions["random"], frozen["random"] = make_random_condition(
+            len(profiles), args.seed, args.random_b_scale, args.random_d_scale,
+            args.random_d_mean)
+    for c in conditions:
         if actions[c] is not None:
             b, d = actions[c]
             print(f"[{c}] |b|={float(torch.cat([v.flatten() for v in b.values()]).abs().mean()):.4f} "
@@ -237,10 +270,11 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
+    meta = {"args": vars(args), "conditions": conditions, "hn_checkpoints": hns}
     with open(out / f"summary_{stamp}.json", "w") as f:
-        json.dump({"args": vars(args), **eval_out}, f, indent=2)
+        json.dump({**meta, **eval_out}, f, indent=2, default=float)
     with open(out / f"raw_{stamp}.pkl", "wb") as f:
-        pickle.dump({"args": vars(args), "profiles": profiles.numpy(),
+        pickle.dump({**meta, "profiles": profiles.numpy(),
                      "post_ids": env.post_ids, "results": env.last_results}, f)
     print(f"Saved to {out}/summary_{stamp}.json and raw_{stamp}.pkl")
 

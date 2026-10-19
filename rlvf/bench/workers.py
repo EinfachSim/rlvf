@@ -8,27 +8,26 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from runners import RUNNER_REGISTRY
 
 """
-One generic worker class. The two axes of variation are injected, not
-subclassed:
+One generic, condition-agnostic worker class (one per GPU). Every episode
+says which condition it belongs to, so any worker can run any condition and
+the number of GPUs no longer has to equal the number of conditions.
 
-  - adapter_mode  : how the value profile reaches the model
+  - adapter mode (per episode): how the value profile reaches the model
         "vera"     -> b/d scaling vectors applied via forward hooks
         "prompted" -> no hooks; profile rendered into the prompt
-        (random / pathwise / warmstart / coldstart all use "vera" — they
-         differ only in *who produced* b and d, which is upstream's business)
-  - benchmark     : what an episode is, delegated to a BenchmarkRunner
-        constructed inside the worker from (name, kwargs) so heavy assets
-        are loaded once per process and never pickled through Ray.
+        "none"     -> plain base model
+        (random and every HN condition use "vera" — they differ only in *who
+         produced* b and d, and in their frozen A/B, stored per condition)
+  - benchmark: what an episode is, delegated to a BenchmarkRunner constructed
+        inside the worker from (name, kwargs) so heavy assets are loaded once
+        per process and never pickled through Ray.
 """
 
-WORKERDICT = {   # condition -> adapter_mode
-    "base":      "none",        # plain base model: no adapter, no profile prompt
-    "prompted":  "prompted",
-    "random":    "vera",
-    "warmstart": "vera",
-    "coldstart": "vera",
-    "pathwise":  "vera",
-}
+
+def adapter_mode(condition: str) -> str:
+    """Condition name -> adapter mode. Anything that is not base/prompted is a
+    VeRA condition (random, or an HN checkpoint under any name)."""
+    return {"base": "none", "prompted": "prompted"}.get(condition, "vera")
 
 LOCK_PATH  = "/tmp/rlvf_model_load.lock"
 MODEL_PATH = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/models/Mistral-7B-Instruct-v0.3"
@@ -68,12 +67,10 @@ def render_profile_prompt(profile: list[float]) -> str:
 
 @ray.remote(num_gpus=1, num_cpus=8)
 class BaseWorker:
-    def __init__(self, adapter_mode: str, benchmark: str, runner_kwargs: dict):
-        assert adapter_mode in ("vera", "prompted", "none")
-        self.adapter_mode = adapter_mode
+    def __init__(self, benchmark: str, runner_kwargs: dict):
         self.device = "cuda:0"
         self._hooks = []
-        self.A = self.B = None       # frozen VeRA matrices, set via set_frozen
+        self.frozen = {}             # condition -> (A, B) on the GPU, via set_frozen
 
         print("[EnvWorker] Waiting for model load lock...")
         with open(LOCK_PATH, "w") as lock_file:
@@ -99,7 +96,7 @@ class BaseWorker:
             with torch.no_grad():                  # done on the plain base model
                 self.runner.setup(self.model, self.tokenizer, self.device)
 
-        print(f"[EnvWorker] Ready (adapter_mode={adapter_mode}, benchmark={benchmark}).")
+        print(f"[EnvWorker] Ready (benchmark={benchmark}).")
 
     # ── Adapter application (forward hooks, fp32) ─────────────────────────────
 
@@ -130,30 +127,34 @@ class BaseWorker:
 
     # ── Benchmark episode ─────────────────────────────────────────────────────
 
-    def set_frozen(self, A_np: dict, B_np: dict):
-        """Frozen VeRA A/B for this condition; sent once, kept on the GPU."""
-        self.A = {k: torch.tensor(v, device=self.device, dtype=torch.float32)
-                  for k, v in A_np.items()}
-        self.B = {k: torch.tensor(v, device=self.device, dtype=torch.float32)
-                  for k, v in B_np.items()}
+    def set_frozen(self, condition: str, A_np: dict, B_np: dict):
+        """Frozen VeRA A/B of one condition; sent once, kept on the GPU."""
+        self.frozen[condition] = (
+            {k: torch.tensor(v, device=self.device, dtype=torch.float32) for k, v in A_np.items()},
+            {k: torch.tensor(v, device=self.device, dtype=torch.float32) for k, v in B_np.items()},
+        )
 
-    def run_episode(self, adapter_id, profile, b_np, d_np, task) -> dict:
-        envelope = {"adapter_id": adapter_id, "worker_mode": self.adapter_mode}
+    def run_episode(self, condition, adapter_id, profile, b_np, d_np, task,
+                    is_ref=False) -> dict:
+        mode = adapter_mode(condition)
+        envelope = {"adapter_id": adapter_id, "worker_type": condition,
+                    "worker_mode": mode, "is_ref": is_ref}
         system_prompt = None
         try:
             t0 = time.perf_counter()
-            if self.adapter_mode == "vera":
-                assert self.A is not None, "set_frozen() was not called"
+            if mode == "vera":
+                assert condition in self.frozen, f"set_frozen() not called for {condition}"
+                A, B = self.frozen[condition]
                 b = {k: torch.tensor(v, device=self.device, dtype=torch.float32)
                      for k, v in b_np.items()}
                 d = torch.tensor(d_np, device=self.device, dtype=torch.float32)
-                self._apply_vera(b, d, self.A, self.B)
+                self._apply_vera(b, d, A, B)
                 envelope.update(
                     d_abs_mean=float(d.abs().mean().item()),
                     b_abs_mean=float(torch.cat(
                         [v.flatten() for v in b.values()]).abs().mean().item()),
                 )
-            elif self.adapter_mode == "prompted":
+            elif mode == "prompted":
                 system_prompt = render_profile_prompt(profile)
             # "none": plain base model
 
@@ -165,11 +166,11 @@ class BaseWorker:
 
             envelope.update(ok=True, metrics=metrics,
                             t_episode=time.perf_counter() - t0)
-            print(f"[EnvWorker] Episode {adapter_id} done "
-                  f"in {envelope['t_episode']:.2f}s")
+            print(f"[EnvWorker] {condition}#{adapter_id}{' (ref)' if is_ref else ''} "
+                  f"done in {envelope['t_episode']:.2f}s", flush=True)
             return envelope
         except Exception as e:
-            print(f"[EnvWorker] Episode {adapter_id} failed: {e}")
+            print(f"[EnvWorker] {condition}#{adapter_id} failed: {e}", flush=True)
             envelope.update(ok=False, metrics=None, error=str(e))
             return envelope
         finally:
