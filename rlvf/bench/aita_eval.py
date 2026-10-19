@@ -9,8 +9,9 @@ Conditions (all on the SAME profiles and tasks; any number of GPUs):
   random     random VeRA A/B and random b, d per profile, scale-matched to an HN
   <name>     any HN checkpoint, given as --hn <name>=<path> (repeatable);
              legacy --ckpt_pathwise / --ckpt_warmstart / --ckpt_coldstart work too
-Every conditioned condition also runs once with the neutral profile p = 0,
-the reference for the probability gain.
+Every conditioned condition also runs once with the eval prior's mean profile
+(the average person), the reference for the probability gain.
+Re-score a finished run without the GPU:  python recompute.py results/aita/raw_<stamp>.pkl
 
 Usage (from the bench folder, rlvf importable):
   python aita_eval.py --benchmark aita --dataset /path/aita_dataset_10_values_reduced.json \

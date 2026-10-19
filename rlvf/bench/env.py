@@ -19,9 +19,10 @@ class BaseEnv(ABC):
 
     Episodes per condition:
       * one per eval profile (N), and
-      * one REFERENCE episode with the neutral profile p = 0 (every value at the
-        person's own average). It plays the role of Nie et al.'s "baseline SFT"
-        control: the same conditioning mechanism without a value preference,
+      * one REFERENCE episode with the eval prior's MEAN profile (the average
+        person: population means for eval_means="empirical", p = 0 for the
+        zero-mean prior). It plays the role of Nie et al.'s "baseline SFT"
+        control: the same conditioning mechanism without an individual preference,
         so profile-driven shifts can be measured against the condition's own
         generic offset. Flagged is_ref=True; excluded from per-profile metrics.
       * "base" does not depend on the profile, so for benchmarks whose task is
@@ -57,7 +58,8 @@ class BaseEnv(ABC):
         eval_sampler = ValueProfileSampler(rng=rng_seed, means=eval_means)
         eval_np = eval_sampler.sample_batch(eval_size)
         self.eval_profiles = torch.tensor(eval_np, dtype=torch.float32)
-        self.ref_profile = torch.zeros(1, self.eval_profiles.shape[1])
+        ref = torch.tensor(eval_sampler.means, dtype=torch.float32)[None]
+        self.ref_profile = ref - ref.mean(1, keepdim=True)        # ipsatized prior mean
         print(f"[BenchEnv] {eval_size} eval profiles (seed {rng_seed}), "
               f"means={eval_means or 'zero'}")
 

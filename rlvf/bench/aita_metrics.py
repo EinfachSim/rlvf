@@ -27,16 +27,19 @@ Adaptations (they fine-tune one value down; we condition on whole profiles):
   1. ALIGNMENT r (main metric): correlation across profiles between the
      profile's score on X and pi_X. Mean over values with enough posts.
   2. PROBABILITY GAIN (paper metric), relative to a REFERENCE: the same
-     condition with the neutral profile p = 0 (our analogue of their baseline
-     SFT control: same mechanism, no value preference):
+     condition conditioned on the eval set's prior mean profile, i.e. the
+     average person (our analogue of their baseline SFT control: same
+     mechanism, no individual value preference). gain is the half difference
+     top - bottom third and does not depend on the reference:
         gain_low  = pi_ref - mean pi(bottom-third X profiles)   <- = paper's setting
         gain_high = mean pi(top-third X profiles) - pi_ref
         gain      = (gain_low + gain_high) / 2
      Also against the plain base model (gain_low_base / gain_high_base).
      Weighted average over values, weights = number of eval posts.
   3. SPECIFICITY (analogue of target vs other values): regress pi_Y on the
-     standardized scores of all values; own-value coefficient vs mean |coef|
-     of the other values. Plain correlations confound this, because value
+     standardized scores of all values (both sides standardized, so the
+     coefficients are on the scale of a correlation); own-value coefficient
+     vs mean |coef| of the other values. Plain correlations confound this, because value
      scores are themselves correlated across profiles (circumplex).
   4. HARSHNESS: correlation of X's score with the overall lean
      P(YTA) - P(NTA) over all posts (a general tendency, not value-specific).
@@ -273,7 +276,9 @@ def _evaluate(results, n_boot, compare_to, seed) -> dict:
         for j in range(len(values)):
             ok = np.isfinite(P[:, j])
             if ok.sum() > X.shape[1] + 2:
-                beta = np.linalg.lstsq(X[ok], P[ok, j], rcond=None)[0][1:]
+                y = P[ok, j]
+                y = (y - y.mean()) / (y.std() if y.std() > 1e-9 else 1.0)   # standardized beta
+                beta = np.linalg.lstsq(X[ok], y, rcond=None)[0][1:]
                 own.append(beta[j]); other.append(np.mean(np.abs(np.delete(beta, j))))
             else:
                 own.append(np.nan); other.append(np.nan)
@@ -372,7 +377,7 @@ def print_report(summary: dict):
           " ".join(f"{any_s['per_value'][v]['posts_per_side']:>7d}" for v in values))
 
     print("\n[AITA 2] probability gain (Nie et al. 2025), percentage points, vs. the "
-          "condition's own neutral-profile reference\n"
+          "condition's own reference (average-person profile)\n"
           "         gain_low = shift toward the low-standard stance for bottom-third "
           "profiles (= paper's 'value lowered' setting)")
     print(f"{'condition':14s} {'gain':>6s} {'95% CI':>15s} {'high':>6s} {'low':>6s} "
@@ -386,8 +391,8 @@ def print_report(summary: dict):
               + " ".join(_cell(s["per_value"][v]["gain"], pp=True) for v in values))
     print("  gain/high/low: weighted average over values (weights = #eval posts)")
 
-    print("\n[AITA 3] specificity: pi_value regressed on all value scores (standardized); "
-          "own coefficient vs mean |other coefficients|")
+    print("\n[AITA 3] specificity: standardized pi_value regressed on all standardized value "
+          "scores; own coefficient vs mean |other coefficients|")
     print(f"{'condition':14s} {'own':>7s} {'other':>7s} " + head)
     for c in order:
         s = pc[c]
@@ -407,4 +412,3 @@ def print_report(summary: dict):
         for k, d in summary["paired"].items():
             print(f"  {k:30s} {d['diff_mean_r']:+.3f} [{d['ci'][0]:+.3f}, {d['ci'][1]:+.3f}]")
     print()
-
