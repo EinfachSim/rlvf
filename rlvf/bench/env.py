@@ -10,6 +10,7 @@ import ray
 from workers import BaseWorker, adapter_mode
 import aita_metrics
 import pvq_metrics
+import valact_metrics
 from rlvf.data import ValueProfileSampler
 
 
@@ -271,6 +272,61 @@ class PVQEnv(BaseEnv):
             for r in rs:
                 if not r["ok"]:
                     print(f"[{tag}]   {wt}#{r['adapter_id']} failed: {r.get('error')}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# VALACT-15K
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ValActEnv(BaseEnv):
+    """
+    Do the conditioned model's CHOICES between value-laden actions follow its
+    profile? ValAct-15k (arXiv:2601.07972): n_scenarios advice-seeking
+    scenarios, balanced over the 5 domains, all 5 four-option questions each.
+    Every value appears twice per scenario; the option order is rotated per
+    question so every value sits in every letter position equally often.
+    """
+
+    def __init__(self, data_dir: str, scenario_file: str = None, n_scenarios: int = 200,
+                 n_boot: int = 2000, compare_to: str = None, **base_kwargs):
+        super().__init__(benchmark="valact",
+                         runner_kwargs={"data_dir": data_dir, "scenario_file": scenario_file},
+                         **base_kwargs)
+        from runners import load_valact
+        scen = load_valact(data_dir, scenario_file)
+        by_cat = defaultdict(list)
+        for s in scen:
+            by_cat[s["category"]].append(s["idx"])
+        per_cat = max(1, n_scenarios // len(by_cat))
+        chosen = []
+        for cat in sorted(by_cat):
+            ids = list(by_cat[cat]); self.rng.shuffle(ids)
+            chosen += sorted(ids[:per_cat])
+        self.questions = [(sid, qi, (k * 5 + qi) % 4) for k, sid in enumerate(chosen)
+                          for qi in range(5)]
+        self.post_ids = []          # uniform saving
+        self.n_boot, self.compare_to = n_boot, compare_to
+        n_body = sum(1 for s in scen if s["text"] != s["title"])
+        print(f"[ValActEnv] {len(chosen)} scenarios ({per_cat} per domain), "
+              f"{len(self.questions)} questions; scenario text = "
+              f"{'title + body for %d posts' % n_body if n_body else 'title only (bodies masked)'}")
+
+    def _build_task(self, episode_idx: int) -> dict:
+        return {"questions": self.questions}
+
+    def evaluate_benchmark(self, results):
+        summary = valact_metrics.evaluate(results, n_boot=self.n_boot, compare_to=self.compare_to)
+        valact_metrics.print_report(summary)
+        return {"benchmark": "valact", "per_condition": summary, "errors": self.last_errors}
+
+    def _log(self, results, tag="BENCH"):
+        by_wt = defaultdict(list)
+        for r in results:
+            by_wt[r["worker_type"]].append(r)
+        for wt, rs in by_wt.items():
+            ok = [r for r in rs if r["ok"]]
+            print(f"[{tag}] {wt}: {len(ok)}/{len(rs)} episodes ok, "
+                  f"{sum(r['metrics']['n_questions'] for r in ok)} answers")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
