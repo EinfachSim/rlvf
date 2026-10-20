@@ -29,25 +29,23 @@ EPISODES_PER_WORKER = args.episodes_per_worker
 # ── Config ────────────────────────────────────────────────────────────────────
 DEVICE          = "cuda:0"
 LUSTRE          = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf"
-CHECKPOINT_DIR  = f"{LUSTRE}/{args.checkpoint_dir}"   # v5 = entropy floor, v6 = + whitened input
+CHECKPOINT_DIR  = f"{LUSTRE}/{args.checkpoint_dir}"
 
 NUM_LAYERS      = 32
 LAYER_TYPES     = ["q", "v"]
 DIMS            = {"q": [4096, 4096], "v": [1024, 4096]}
 PROFILE_DIM     = 19
 RANK            = 8
-WHITEN_INPUT    = True    # fixed whitening of the profile inside the HN (data.whitening_matrix)
+WHITEN_INPUT    = True 
 
 LR              = 3e-4
 GRAD_CLIP       = 1.0
 BATCH_SIZE      = 64
 KL_WEIGHT       = 0.1
 MASS_COEF       = 0.1
-# Entropy floor on the 6-digit answer distributions (see workers.run_episode_grad).
-# Keeps the expected-value surrogate's gradient alive. Watch train/pmax: it
-# should stay clearly below 1 (e.g. < 0.9) while the score improves.
+
 ENT_FLOOR_COEF  = 0.1
-H_MIN           = 0.5     # nats; ln(6) = 1.79 is the maximum
+H_MIN           = 0.5
 
 TOTAL_STEPS     = 1000
 EVAL_EVERY      = 5
@@ -99,8 +97,6 @@ def load_checkpoint(path: str) -> int:
     print(result.unexpected_keys)
     optimizer.load_state_dict(ckpt["optimizer"])
     print(f"[train] Resumed from {path} (step {ckpt['step']})")
-    # The checkpoint at step N holds the weights AFTER update N (it is saved at
-    # the end of iteration N), so training continues at N + 1.
     return ckpt["step"] + 1
 
 start_step = 0

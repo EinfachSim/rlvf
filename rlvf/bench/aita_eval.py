@@ -37,7 +37,7 @@ from pathlib import Path
 import ray
 import torch
 
-from env import AITAEnv, PVQEnv
+from env import AITAEnv, PVQEnv, ValActEnv
 from workers import MODEL_PATH, TARGET_LAYERS, LAYER_TYPES, RANK
 
 FIXED_CONDITIONS = ("base", "prompted", "random")
@@ -174,7 +174,14 @@ def make_random_condition(n: int, seed: int, b_scale: float, d_scale: float,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--benchmark", choices=["aita", "pvq"], default="aita")
+    ap.add_argument("--benchmark", choices=["aita", "pvq", "valact"], default="aita")
+    ap.add_argument("--valact_dir", help="clone of github.com/penguinnnnn/ValAct-15k "
+                                         "(needed for --benchmark valact)")
+    ap.add_argument("--valact_scenarios", default=None,
+                    help="optional json {post url: post body}; released bodies are masked, so "
+                         "by default the scenario is the post title")
+    ap.add_argument("--valact_n", type=int, default=200,
+                    help="scenarios (balanced over 5 domains; 5 questions each)")
     ap.add_argument("--dataset", help="AITA json (needed for --benchmark aita)")
     ap.add_argument("--quest_path", default=None,
                     help="PVQ-RR questionnaire.txt (default: training path)")
@@ -239,6 +246,8 @@ def main():
             ap.error(f"condition {c!r} needs --hn {c}=PATH")
     if args.benchmark == "aita" and not args.dataset:
         ap.error("--benchmark aita needs --dataset")
+    if args.benchmark == "valact" and not args.valact_dir:
+        ap.error("--benchmark valact needs --valact_dir")
     args.out = args.out or f"results/{args.benchmark}"
 
     ray.init()
@@ -257,6 +266,10 @@ def main():
             env = AITAEnv(dataset_path=args.dataset, posts_per_side=args.posts_per_side,
                           verdicts=args.verdicts, scoring=args.scoring, n_boot=args.n_boot,
                           compare_to=args.compare_to, worker_types=conditions, **common)
+        elif args.benchmark == "valact":
+            env = ValActEnv(data_dir=args.valact_dir, scenario_file=args.valact_scenarios,
+                            n_scenarios=args.valact_n, n_boot=args.n_boot,
+                            compare_to=args.compare_to, worker_types=conditions, **common)
         else:
             env = PVQEnv(quest_path=args.quest_path, worker_types=conditions, **common)
         workers = env.workers

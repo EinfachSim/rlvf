@@ -94,9 +94,7 @@ class EnvWorker:
                   for k, v in B_np.items()}
         self._A_cpu = {k: v.cpu() for k, v in self.A.items()}
         self._B_cpu = {k: v.cpu() for k, v in self.B.items()}
-        # Rank is taken from A/B (RANK above is only the training default); the
-        # hooks and gradients are rank-agnostic, which the adapter-capacity
-        # oracle (oracle_capacity.py) relies on.
+        # Rank is taken from A/B (RANK above is only the training default)
         self.rank = int(self.A[LAYER_TYPES[0]].shape[1])
         for t in LAYER_TYPES:
             assert self.A[t].shape[0] == len(TARGET_LAYERS) and \
@@ -149,7 +147,7 @@ class EnvWorker:
         self.base_logits  = data["logits"]
         self.domain_texts = data["texts"]
 
-        # Cache domain-text tokenization once (fixed forever).
+        # Cache domain-text tokenization once
         self._domain_inputs = self.tokenizer(
             self.domain_texts, return_tensors="pt",
             padding=True, truncation=True, max_length=512,
@@ -161,7 +159,7 @@ class EnvWorker:
             self._domain_inputs["attention_mask"][:, :seq_len].bool()
         self._domain_mask_count = float(self._domain_mask.sum().item())
 
-        # Pre-tokenize the questionnaire prompts once.
+        # Pre-tokenize the questionnaire prompts once
         prompts = [
             f"[INST] How much does the following statement describe you?\n"
             f"1 = Not like me at all, 6 = Very much like me.\n"
@@ -551,9 +549,7 @@ class EnvWorker:
         saturating to one-hot, where the expected-value surrogate has zero
         gradient (d a_hat / d z_k = pi_k (k - a_hat) = 0 for one-hot pi) and
         where the policy gradient also dies (grad log pi -> 0, LOO advantage
-        -> 0 because every sample is identical). Only active for items whose
-        distribution is sharper than h_min; the linear bonus ent_coef (token_pg)
-        is kept separately.
+        -> 0 because every sample is identical).
         """
         import time
         assert mode in ("pathwise", "token_pg")

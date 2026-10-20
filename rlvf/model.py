@@ -178,9 +178,9 @@ class HyperNetwork(torch.nn.Module):
         """
 
         if self.whiten is not None:
-            x = x @ self.whiten          # (B, k): unit-variance, decorrelated
+            x = x @ self.whiten # (B, k): unit-variance, decorrelated
         else:
-            x = x / 0.8                  # legacy: crude standardization
+            x = x / 0.8 # legacy to keep old checkpoints runnable
         h = self._trunk(x)
         d_mean = self.d_head_mean(h) # (B, L*T, rank)
         b_mean = {}

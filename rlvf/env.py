@@ -1,384 +1,405 @@
+# environment, is called by the main benchmark script and should
+# delegate all workers on the given benchmark
+from abc import ABC, abstractmethod
+from collections import defaultdict
+import random
+
 import torch
 import ray
-from ray.util.actor_pool import ActorPool
-from abc import ABC, abstractmethod
-from rlvf.data import ValueProfileSampler, mahalanobis_weight
-from rlvf.workers import EnvWorker
+
+from workers import BaseWorker, adapter_mode
+import aita_metrics
+import pvq_metrics
+import valact_metrics
+from rlvf.data import ValueProfileSampler
+
 
 class BaseEnv(ABC):
-    @abstractmethod
-    def get_observation_batch(self, batch_size: int) -> torch.Tensor:
-        ...
+    """
+    Runs every condition on the same profiles and the same tasks.
 
-    @abstractmethod
-    def step_batch(
-        self,
-        action_batch: torch.Tensor,
-        states: torch.Tensor,
-    ) -> torch.Tensor:
-        ...
+    Episodes per condition:
+      * one per eval profile (N), and
+      * one REFERENCE episode with the eval prior's MEAN profile (the average
+        person: population means for eval_means="empirical", p = 0 for the
+        zero-mean prior). It plays the role of Nie et al.'s "baseline SFT"
+        control: the same conditioning mechanism without an individual preference,
+        so profile-driven shifts can be measured against the condition's own
+        generic offset. Flagged is_ref=True; excluded from per-profile metrics.
+      * "base" does not depend on the profile, so for benchmarks whose task is
+        the same for every episode it runs ONCE and is broadcast to all
+        profiles (64x cheaper, identical numbers).
+    Workers are condition-agnostic, one per GPU; episodes are load-balanced.
+    """
+    BROADCAST_BASE = True     # task identical across episodes (AITA, PVQ)
+    USE_REFERENCE = True
 
-
-class RLVFEnv(BaseEnv):
     def __init__(
         self,
-        A,
-        B,
-        num_workers: int = 16,
-        episodes_per_worker: int = 4,
-        kl_weight: float = 0.1,
-        eval_size: int = 32,
-        rng_seed: int = 42,
-        batch_size: int = None,
+        benchmark: str,               # key into runners.RUNNER_REGISTRY
+        runner_kwargs: dict,
+        rng_seed: int = 1234,
+        worker_types: list[str] = ["prompted"],
+        eval_size: int = 64,
         num_layers: int = 32,
         layer_types: int = 2,
         rank: int = 8,
-        verbose: bool = False,
-        train_means=None,          # None -> zero-mean (uniform coverage of profile space)
-        eval_means="empirical",    # "empirical" -> population prior (Schwartz & Cieciuch 2022, Table 5)
-        rec_mode: str = "mse",     # "mse" | "mahalanobis": reconstruction objective for gradients, not used
-        mahal_cap: float = 10.0,   # max weight ratio weak/strong direction (None = uncapped), not used
+        eval_means="empirical",   # population prior by default; None -> zero-mean
+        num_workers: int = None,  # default: one per available GPU, at most one per condition
+        workers: list = None,     # reuse an existing pool (same benchmark + runner_kwargs)
     ):
-        assert rec_mode in ("mse", "mahalanobis"), rec_mode
-        self.rec_mode = rec_mode
-        self.rec_weight = mahalanobis_weight(cap=mahal_cap) if rec_mode == "mahalanobis" else None
-        print(f"[RLVFEnv] Reconstruction objective: {rec_mode}"
-              + (f" (cap={mahal_cap})" if rec_mode == "mahalanobis" else ""))
-        self.num_workers = num_workers
-        self.episodes_per_worker = episodes_per_worker
-        if not batch_size:
-            self.batch_size = num_workers * episodes_per_worker
-        else:
-            self.batch_size = batch_size
-        self.kl_weight = kl_weight
-        self.verbose = verbose
-
         self.num_layers = num_layers
         self.layer_types = layer_types
         self.rank = rank
-
-        # Diagnostics populated after every _run_pool call
-        self.last_scores = None
-        self.last_kls = None
-        self.last_digit_mass = None
-        self.last_delta_fro = None
-        self.last_entropy = None
-        self.last_pmax = None
-        self.last_p_hat = None
+        self.worker_types = list(worker_types)
+        self.rng = random.Random(rng_seed)
+        self.last_eval = None
         self.last_errors = 0
 
-
-        self.A = A
-        self.B = B
-        A_np = {k: v.detach().cpu().numpy() for k, v in A.items()}
-        B_np = {k: v.detach().cpu().numpy() for k, v in B.items()}
-
-        # ── Samplers ──────────────────────────────────────────────────────────
-        # Training: zero-mean profiles so no value is privileged a priori and
-        # the HN is trained for coverage of the whole admissible profile space.
-        # Eval: population prior (empirical per-value means), i.e. profiles
-        # of realistic people. Both share the empirical correlation structure.
-        # Separate RNGs so the eval set is reproducible regardless of how many
-        # training batches have been drawn.
-        self.train_means = train_means
         self.eval_means = eval_means
-        self.train_sampler = ValueProfileSampler(rng=rng_seed, means=train_means)
-        eval_sampler = ValueProfileSampler(rng=rng_seed + 1, means=eval_means)
-        eval_sampler_zero_mean = ValueProfileSampler(rng=rng_seed + 1)
-
-        # Fixed eval profiles
+        eval_sampler = ValueProfileSampler(rng=rng_seed, means=eval_means)
         eval_np = eval_sampler.sample_batch(eval_size)
         self.eval_profiles = torch.tensor(eval_np, dtype=torch.float32)
-        eval_np_zero_mean = eval_sampler_zero_mean.sample_batch(eval_size)
-        self.eval_profiles_zero_mean = torch.tensor(eval_np_zero_mean, dtype=torch.float32)
-        print(f"[RLVFEnv] Profile sampler: train means={train_means or 'zero'}, "
-              f"eval means={eval_means or 'zero'} ({eval_size} fixed eval profiles)")
+        ref = torch.tensor(eval_sampler.means, dtype=torch.float32)[None]
+        self.ref_profile = ref - ref.mean(1, keepdim=True)        # ipsatized prior mean
+        print(f"[BenchEnv] {eval_size} eval profiles (seed {rng_seed}), "
+              f"means={eval_means or 'zero'}")
 
-        # ── Ray workers ───────────────────────────────────────────────────────
-        print(f"[RLVFEnv] Spawning {num_workers} workers "
-              f"(batch_size={self.batch_size}, "
-              f"Approx. {self.batch_size // num_workers} episodes/worker)...")
-        self.pool = ActorPool([
-            EnvWorker.remote(A_np, B_np, self.rec_weight) for _ in range(num_workers)
-        ])
-        print("[RLVFEnv] All workers ready.")
+        if workers:
+            self.workers, self.num_workers = workers, len(workers)
+            print(f"[BenchEnv] Reusing {self.num_workers} worker(s) for conditions "
+                  f"{self.worker_types}")
+        else:
+            n_gpu = int(ray.cluster_resources().get("GPU", 1))
+            self.num_workers = num_workers or max(1, min(n_gpu, len(self.worker_types)))
+            print(f"[BenchEnv] Spawning {self.num_workers} worker(s) for conditions "
+                  f"{self.worker_types}...")
+            self.workers = [BaseWorker.remote(benchmark=benchmark, runner_kwargs=runner_kwargs)
+                            for _ in range(self.num_workers)]
+            print("[BenchEnv] All workers ready.")
+
+    @property
+    def action_profiles(self) -> torch.Tensor:
+        """Profiles to build adapters for: the N eval profiles, then the
+        neutral reference profile as row N."""
+        return torch.cat([self.eval_profiles, self.ref_profile], 0)
 
     # ── Public API ────────────────────────────────────────────────────────────
-
-    def get_observation_batch(self, batch_size: int) -> torch.Tensor:
-        """Sample fresh Schwartz profiles for a training batch."""
-        profiles = self.train_sampler.sample_batch(batch_size)
-        return torch.tensor(profiles, dtype=torch.float32) # (batch_size, 19)
-
-    def step_batch(
-        self,
-        action_batch, # (b, d): b dict k->(B, L, d_out[k]); d (B, L*T, rank)
-        states: torch.Tensor, # (batch_size, 19)
-    ) -> torch.Tensor:
+    def step_batch(self, actions: dict, frozen: dict, states=None) -> dict:
         """
-        Fan out batch to workers, collect rewards.
-        Returns rewards: (batch_size,)
+        Run every condition on the same profiles and tasks, then evaluate.
+
+        actions: {condition: (b_batch, d_flat) or None}, built for
+                 self.action_profiles (N + 1 rows; the last is the reference)
+                 b_batch: {"q": (N+1, L, d_out_q), "v": (N+1, L, d_out_v)}
+                 d_flat:  (N+1, L*T, rank)
+                 None for conditions without an adapter (base, prompted).
+        frozen:  {condition: (A, B)} for adapter conditions;
+                 A: {"q": (L, rank, d_in), ...}, B: {"q": (L, d_out, rank), ...}
         """
-        return self._run_pool(action_batch, states)
+        states = self.action_profiles if states is None else states
+        results = self._run_pool(actions, frozen, states)
+        self.last_results = results            # raw, for saving / re-analysis
+        self._log([r for r in results if not r.get("broadcast")], tag="BENCH")
+        self.last_eval = self.evaluate_benchmark(results)
+        return self.last_eval
 
-    def eval_batch(
-        self,
-        action_batch: torch.Tensor,
-        profiles: torch.Tensor = None,
-        tag: str = "EVAL",
-    ) -> dict:
-        """
-        Run a batch of episodes on a fixed set of eval profiles.
-        `profiles` must be the same profiles the actions were generated from
-        (default: self.eval_profiles). Returns diagnostics dict.
-        """
-        if profiles is None:
-            profiles = self.eval_profiles
-        assert action_batch[1].shape[0] == len(profiles), \
-            f"eval action_batch must have {len(profiles)} rows"
-
-        rewards = self._run_pool(action_batch, profiles, tag=tag)
-        align = self.alignment_stats(profiles)
-        return {
-            "eval_align_cross": align["cross"],
-            "eval_r2_mean": align["r2_mean"],
-            "eval_r2_max": align["r2_max"],
-            "eval_phat_var": align["phat_var"],
-            "eval_reward_mean": rewards.mean().item(),
-            "eval_reward_std": rewards.std().item(),
-            "eval_reward_min": rewards.min().item(),
-            "eval_reward_max": rewards.max().item(),
-            "eval_score_mean": float(self.last_scores.mean().item()),
-            "eval_score_disc_mean": float(self.last_scores_disc.mean().item()),
-            "eval_kl_mean": float(self.last_kls.mean().item()),
-            "eval_digit_mass": float(self.last_digit_mass.mean().item()),
-            "eval_entropy": float(self.last_entropy.nanmean().item()),
-            "eval_pmax": float(self.last_pmax.nanmean().item()),
-        }
-
-    def step_batch_grad(
-        self,
-        action_batch, # (b, d) as in step_batch
-        states: torch.Tensor,
-        mode: str = "pathwise",
-        grad_kwargs: dict = None,
-    ) -> dict:
-        """
-        Fan out gradient episodes. Workers return dL/db, dL/dd per episode
-        (L = per-episode LOSS, to be minimized). Failed episodes carry zero
-        grads and ok=False; the trainer divides by n_ok.
-        Returns dict with rewards, stacked grads, and diagnostics.
-        """
-        b_batch, d_flat = action_batch
-        n = d_flat.shape[0]
-        d_batch = d_flat.reshape(
-            n, self.num_layers, self.layer_types, self.rank)
-
-        gk = dict(grad_kwargs or {})
-        payloads = self._build_payloads(b_batch, d_batch, states, n)
-        for chunk in payloads:
-            for ep in chunk:
-                ep["mode"] = mode
-                ep.update(gk)
-
-        results_nested = list(self.pool.map(
-            lambda worker, payload: worker.run_episodes_grad_serial.remote(payload),
-            payloads,
-        ))
-        results = [r for chunk in results_nested for r in chunk]
-        results.sort(key=lambda r: r["adapter_id"])
-
-        ok = torch.tensor([r["ok"] for r in results], dtype=torch.bool)
-        rewards = torch.tensor([r["reward"] for r in results],
-                               dtype=torch.float32)
-        grad_d = torch.stack([
-            torch.from_numpy(r["grad_d"]).reshape(-1, self.rank)
-            for r in results
-        ]) # (n, L*T, rank)
-        grad_b = {}
-        for k in results[0]["grad_b"]:
-            grad_b[k] = torch.stack([
-                torch.from_numpy(r["grad_b"][k]) for r in results
-            ]) # (n, L, d_out)
-
-        self.last_scores = torch.tensor([r["score"] for r in results],
-                                        dtype=torch.float32)
-        self.last_kls = torch.tensor([r["kl"] for r in results],
-                                     dtype=torch.float32)
-        self.last_digit_mass = torch.tensor(
-            [r.get("digit_mass", float("nan")) for r in results],
-            dtype=torch.float32)
-        self.last_entropy = torch.tensor(
-            [r.get("entropy", float("nan")) for r in results],
-            dtype=torch.float32)
-        self.last_pmax = torch.tensor(
-            [r.get("pmax", float("nan")) for r in results],
-            dtype=torch.float32)
-        self.last_p_hat = self._stack_p_hat(results)
-        self.last_errors = int((~ok).sum().item())
-
-        self._log(results, f"GRAD:{mode}")
-        return {
-            "rewards": rewards, "ok": ok,
-            "grad_b": grad_b, "grad_d": grad_d,
-            "env_grad_norms": torch.tensor(
-                [r["grad_norm"] for r in results], dtype=torch.float32),
-            "results": results,
-        }
+    def get_observation_batch(self, batch_size: int = None) -> torch.Tensor:
+        return self.eval_profiles
 
     # ── Internals ─────────────────────────────────────────────────────────────
+    @abstractmethod
+    def _log(self, results, tag="BENCH"):
+        ...
 
-    def _run_pool(
-        self,
-        action_batch,
-        states: torch.Tensor,
-        tag: str = "TRAIN",
-    ) -> torch.Tensor:
-        b_batch, d_flat = action_batch
-        n = d_flat.shape[0]
+    @abstractmethod
+    def evaluate_benchmark(self, results) -> dict:
+        ...
 
-        d_batch = d_flat.reshape(
-            n, self.num_layers, self.layer_types, self.rank
-        )
+    @abstractmethod
+    def _build_task(self, episode_idx: int) -> dict:
+        """Benchmark-specific slice of the payload (posts to judge / game to
+        play). Must be deterministic so all conditions get identical tasks."""
+        ...
 
-        payloads = self._build_payloads(b_batch, d_batch, states, n)
+    def _run_pool(self, actions: dict, frozen: dict, states) -> list[dict]:
+        n = len(states) - 1                    # last row = reference profile
+        vera = [c for c in self.worker_types if adapter_mode(c) == "vera"]
+        for c in vera:
+            assert actions.get(c) is not None and c in frozen, f"{c}: missing adapters/A,B"
+            assert actions[c][1].shape[0] == n + 1, \
+                f"{c}: adapters must be built for env.action_profiles ({n + 1} rows)"
+        # Frozen A/B of every VeRA condition to every worker, once (~13 MB each).
+        ray.get([w.set_frozen.remote(c,
+                    {k: v.detach().cpu().numpy() for k, v in frozen[c][0].items()},
+                    {k: v.detach().cpu().numpy() for k, v in frozen[c][1].items()})
+                 for w in self.workers for c in vera])
 
-        if self.verbose:
-            for i, p in enumerate(payloads):
-                ids = [ep["adapter_id"] for ep in p]
-                print(f"[Debug] Worker {i} gets adapter_ids: {ids}")
+        episodes = []
+        for c in self.worker_types:
+            if c == "base" and self.BROADCAST_BASE:
+                idxs = [n]                                   # one run, broadcast below
+            else:
+                idxs = list(range(n)) + ([n] if self.USE_REFERENCE else [])
+            episodes += self._build_payloads(c, actions.get(c), states, idxs)
 
-        results_nested = list(self.pool.map(
-            lambda worker, payload: worker.run_episodes_serial.remote(payload),
-            payloads,
-        ))
-
-        results = [r for chunk in results_nested for r in chunk]
-        results.sort(key=lambda r: r["adapter_id"])
-
-        rewards = torch.tensor(
-            [r["reward"] for r in results], dtype=torch.float32
-        )
-
-        # Populate diagnostics
-        self.last_scores = torch.tensor(
-            [r["score"] for r in results], dtype=torch.float32)
-        self.last_scores_disc = torch.tensor(
-            [r["score_disc"] for r in results], dtype=torch.float32)
-        self.last_kls = torch.tensor(
-            [r["kl"] for r in results], dtype=torch.float32)
-        self.last_digit_mass = torch.tensor(
-            [r.get("digit_mass", float("nan")) for r in results],
-            dtype=torch.float32)
-        self.last_delta_fro = torch.tensor(
-            [r.get("delta_w_frobenius", float("nan")) for r in results],
-            dtype=torch.float32)
-        self.last_entropy = torch.tensor(
-            [r.get("entropy", float("nan")) for r in results],
-            dtype=torch.float32)
-        self.last_pmax = torch.tensor(
-            [r.get("pmax", float("nan")) for r in results],
-            dtype=torch.float32)
-        self.last_p_hat = self._stack_p_hat(results)
-        self.last_errors = sum(1 for r in results if "error" in r)
-
-        self._log(results, tag)
-        return rewards
-
-    # ── Alignment diagnostics ─────────────────────────────────────────────────
-
-    @staticmethod
-    def _stack_p_hat(results) -> torch.Tensor:
-        """(n, 19) answered profiles; NaN rows for failed episodes."""
-        rows = []
+        pool = ray.util.ActorPool(self.workers)              # homogeneous -> load-balanced
+        results = list(pool.map_unordered(lambda w, ep: w.run_episode.remote(**ep), episodes))
         for r in results:
-            ph = r.get("p_hat")
-            rows.append(torch.tensor(ph, dtype=torch.float32) if ph is not None
-                        else torch.full((19,), float("nan")))
-        return torch.stack(rows)
+            r["profile"] = states[r["adapter_id"]].tolist()
 
-    def alignment_stats(self, profiles: torch.Tensor) -> dict:
-        """
-        How much of the answered profile tracks the target, across the batch.
-        Uses self.last_p_hat from the most recent pool call.
-          cross    : mean_j mean_n p_hat[n,j] * p[n,j], 0 for any constant
-                     predictor, > 0 as soon as the HN tracks anything. Note
-                     score = -(E[p_hat^2] + E[p^2] - 2*cross).
-          r2_j     : corr(p_hat[:,j], p[:,j])^2 across the batch, per value.
-          phat_var : mean_j Var_n p_hat[n,j], spread of answered profiles
-                     across the batch (0 for a constant predictor).
-        """
-        ph = self.last_p_hat
-        p = profiles.to(ph.dtype)
-        ok = ~torch.isnan(ph).any(dim=1)
-        ph, p = ph[ok], p[ok]
-        if ph.shape[0] < 3:
-            nan = float("nan")
-            return {"cross": nan, "r2_mean": nan, "r2_max": nan,
-                    "phat_var": nan, "r2_per_value": [nan] * 19}
-        cross = float((ph * p).mean().item())
-        phc = ph - ph.mean(0, keepdim=True)
-        pc = p - p.mean(0, keepdim=True)
-        num = (phc * pc).sum(0)
-        den = (phc.pow(2).sum(0) * pc.pow(2).sum(0)).sqrt().clamp_min(1e-12)
-        r2 = (num / den).pow(2) # (19,)
-        return {
-            "cross": cross,
-            "r2_mean": float(r2.mean().item()),
-            "r2_max": float(r2.max().item()),
-            "phat_var": float(ph.var(0).mean().item()),
-            "r2_per_value": r2.tolist(),
-        }
+        if "base" in self.worker_types and self.BROADCAST_BASE:
+            ref = next(r for r in results if r["worker_type"] == "base")
+            for i in range(n):
+                results.append({**ref, "adapter_id": i, "is_ref": False, "broadcast": True,
+                                "profile": states[i].tolist()})
 
-    def _build_payloads(
-        self,
-        b_batch,
-        d_batch,
-        states,
-        n: int,
-    ) -> list[list[dict]]:
+        self.last_errors = sum(not r["ok"] for r in results if not r.get("broadcast"))
+        if self.last_errors:
+            print(f"[BenchEnv] WARNING: {self.last_errors} failed episodes")
+        results.sort(key=lambda r: (r["worker_type"], r["is_ref"], r["adapter_id"]))
+        return results
 
-        base  = n // self.num_workers
-        extra = n % self.num_workers 
+    def _build_payloads(self, condition, action, states, idxs) -> list[dict]:
+        # Every condition gets the same profiles AND identical tasks → paired comparison.
+        n_rows = len(states)
+        if action is not None:
+            b_batch, d_flat = action
+            d_batch = d_flat.reshape(n_rows, self.num_layers, self.layer_types, self.rank)
+        return [{
+            "condition":  condition,
+            "adapter_id": i,
+            "is_ref":     i == n_rows - 1,
+            "profile":    states[i].tolist(),
+            "b_np":       None if action is None else
+                          {k: v[i].detach().cpu().numpy() for k, v in b_batch.items()},
+            "d_np":       None if action is None else d_batch[i].detach().cpu().numpy(),
+            "task":       self._build_task(i),
+        } for i in idxs]
 
-        payloads = []
-        idx = 0
-        for w in range(self.num_workers):
-            chunk_size = base + (1 if w < extra else 0)
-            chunk = []
-            for _ in range(chunk_size):
-                chunk.append({
-                    "adapter_id": idx,
-                    "profile":    states[idx].tolist(),
-                    "b_np":       {k: v[idx].cpu().numpy()
-                                   for k, v in b_batch.items()},
-                    "d_np":       d_batch[idx].cpu().numpy(),
-                    "kl_weight":  self.kl_weight,
-                })
-                idx += 1
-            payloads.append(chunk)
-        return payloads
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AITA
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Value index mapping lives in aita_metrics.COARSE_TO_REFINED (one source of truth).
+
+
+class AITAEnv(BaseEnv):
+    """
+    Does the profile a model is conditioned on show up in its AITA verdicts?
+    Metric: see aita_metrics.py (per value: correlation across profiles between
+    the profile's value score and how often the model takes the high-value
+    stance; mean over values = one number per condition).
+    """
+
+    def __init__(self, dataset_path: str, posts_per_side: int = 25,
+                 verdicts: str = "ternary", scoring: str = "sequence",
+                 n_boot: int = 2000, compare_to: str = None, **base_kwargs):
+        super().__init__(
+            benchmark="aita",
+            runner_kwargs={"dataset_path": dataset_path, "verdicts": verdicts,
+                           "scoring": scoring},
+            **base_kwargs,
+        )
+        import json
+        with open(dataset_path) as f:
+            raw = json.load(f)
+        self.post_ids = aita_metrics.select_eval_posts(
+            raw, posts_per_side, self.rng, include_neutral=(verdicts == "ternary"))
+        self.n_boot, self.compare_to = n_boot, compare_to
+        print(f"[AITAEnv] Fixed eval set: {len(self.post_ids)} posts "
+              f"({verdicts} verdicts, {scoring} scoring)")
+
+    def _build_task(self, episode_idx: int) -> dict:
+        return {"post_ids": self.post_ids}      # identical for everyone
+
+    def evaluate_benchmark(self, results: list[dict]) -> dict:
+        summary = aita_metrics.evaluate(results, n_boot=self.n_boot,
+                                        compare_to=self.compare_to)
+        aita_metrics.print_report(summary)
+        return {"benchmark": "aita", "per_condition": summary,
+                "errors": self.last_errors}
 
     def _log(self, results: list[dict], tag: str):
-        rewards = [r["reward"] for r in results]
-        scores  = [r["score"]  for r in results]
-        scores_disc = [r["score_disc"] for r in results]
-        kls     = [r["kl"]     for r in results]
-        errors  = [r for r in results if "error" in r]
-        n       = len(results)
-        H  = float(self.last_entropy.nanmean().item()) \
-            if self.last_entropy is not None else float("nan")
-        pm = float(self.last_pmax.nanmean().item()) \
-            if self.last_pmax is not None else float("nan")
-        print(
-            f"[RLVFEnv:{tag}] "
-            f"reward: {sum(rewards)/n:+.4f} | "
-            f"score: {sum(scores)/n:+.4f} | "
-            f"score_disc: {sum(scores_disc)/n:+.4f} | "
-            f"kl: {sum(kls)/n:.4f} | "
-            f"H: {H:.3f} | pmax: {pm:.3f} | "
-            f"errors: {len(errors)}/{n}"
+        by_wt = defaultdict(list)
+        for r in results:
+            by_wt[r["worker_type"]].append(r)
+        for wt, rs in by_wt.items():
+            ok = [r for r in rs if r["ok"]]
+            t = sum(r.get("t_episode", 0.0) for r in ok)
+            print(f"[{tag}] {wt}: {len(ok)}/{len(rs)} episodes ok, "
+                  f"{sum(r['metrics']['n_posts'] for r in ok)} verdicts, "
+                  f"{t:.1f}s total")
+            for r in rs:
+                if not r["ok"]:
+                    print(f"[{tag}]   {wt}#{r['adapter_id']} failed: {r.get('error')}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PVQ-RR
+# ──────────────────────────────────────────────────────────────────────────────
+
+class PVQEnv(BaseEnv):
+    """
+    Does the conditioned model answer the PVQ-RR questionnaire according to
+    its profile? Scored exactly as in training; see pvq_metrics.py.
+    """
+
+    def __init__(self, quest_path: str = None, **base_kwargs):
+        runner_kwargs = {} if quest_path is None else {"quest_path": quest_path}
+        super().__init__(benchmark="pvq", runner_kwargs=runner_kwargs, **base_kwargs)
+        self.post_ids = []          # no posts; kept so saving/merging is uniform
+
+    def _build_task(self, episode_idx: int) -> dict:
+        return {}                   # every episode answers all 57 items
+
+    def evaluate_benchmark(self, results: list[dict]) -> dict:
+        summary = pvq_metrics.pvq_table([r for r in results if not r.get("is_ref")])
+        pvq_metrics.print_pvq_table(summary)
+        return {"benchmark": "pvq", "per_condition": summary,
+                "errors": self.last_errors}
+
+    def _log(self, results: list[dict], tag: str):
+        by_wt = defaultdict(list)
+        for r in results:
+            by_wt[r["worker_type"]].append(r)
+        for wt, rs in by_wt.items():
+            ok = [r for r in rs if r["ok"]]
+            dm = (sum(r["metrics"]["digit_mass"] for r in ok) / len(ok)) if ok else float("nan")
+            print(f"[{tag}] {wt}: {len(ok)}/{len(rs)} episodes ok, "
+                  f"digit mass {dm:.3f}")
+            for r in rs:
+                if not r["ok"]:
+                    print(f"[{tag}]   {wt}#{r['adapter_id']} failed: {r.get('error')}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# VALACT-15K
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ValActEnv(BaseEnv):
+    """
+    Do the conditioned model's CHOICES between value-laden actions follow its
+    profile? ValAct-15k (arXiv:2601.07972): n_scenarios advice-seeking
+    scenarios, balanced over the 5 domains, all 5 four-option questions each.
+    Every value appears twice per scenario; the option order is rotated per
+    question so every value sits in every letter position equally often.
+    """
+
+    def __init__(self, data_dir: str, scenario_file: str = None, n_scenarios: int = 200,
+                 n_boot: int = 2000, compare_to: str = None, **base_kwargs):
+        super().__init__(benchmark="valact",
+                         runner_kwargs={"data_dir": data_dir, "scenario_file": scenario_file},
+                         **base_kwargs)
+        from runners import load_valact
+        scen = load_valact(data_dir, scenario_file)
+        by_cat = defaultdict(list)
+        for s in scen:
+            by_cat[s["category"]].append(s["idx"])
+        per_cat = max(1, n_scenarios // len(by_cat))
+        chosen = []
+        for cat in sorted(by_cat):
+            ids = list(by_cat[cat]); self.rng.shuffle(ids)
+            chosen += sorted(ids[:per_cat])
+        self.questions = [(sid, qi, (k * 5 + qi) % 4) for k, sid in enumerate(chosen)
+                          for qi in range(5)]
+        self.post_ids = []          # uniform saving
+        self.n_boot, self.compare_to = n_boot, compare_to
+        n_body = sum(1 for s in scen if s["text"] != s["title"])
+        print(f"[ValActEnv] {len(chosen)} scenarios ({per_cat} per domain), "
+              f"{len(self.questions)} questions; scenario text = "
+              f"{'title + body for %d posts' % n_body if n_body else 'title only (bodies masked)'}")
+
+    def _build_task(self, episode_idx: int) -> dict:
+        return {"questions": self.questions}
+
+    def evaluate_benchmark(self, results):
+        summary = valact_metrics.evaluate(results, n_boot=self.n_boot, compare_to=self.compare_to)
+        valact_metrics.print_report(summary)
+        return {"benchmark": "valact", "per_condition": summary, "errors": self.last_errors}
+
+    def _log(self, results, tag="BENCH"):
+        by_wt = defaultdict(list)
+        for r in results:
+            by_wt[r["worker_type"]].append(r)
+        for wt, rs in by_wt.items():
+            ok = [r for r in rs if r["ok"]]
+            print(f"[{tag}] {wt}: {len(ok)}/{len(rs)} episodes ok, "
+                  f"{sum(r['metrics']['n_questions'] for r in ok)} answers")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MACCHIAVELLI
+# ──────────────────────────────────────────────────────────────────────────────
+
+class MacchiavelliEnv(BaseEnv):
+    """
+    `repo_dir` = checkout of caisa-lab/machiavelli, with game_data/ inside it.
+    Each episode index maps deterministically to a (game, seed), so all worker
+    types play the identical set of playthrough tasks.
+    """
+
+    # Headline metrics aggregated per worker_type (from Trajectory.get_mach_counts)
+    KEY_COUNTS = ["power.Σ", "violations.Σ", "utility.suffering", "game.score"]
+    BROADCAST_BASE = False    # each episode plays a different (game, seed)
+    USE_REFERENCE = False
+
+    def __init__(self, repo_dir: str, games: list[str], seeds: list[int] = [0],
+                 max_steps: int = 1000, **base_kwargs):
+        self.games = games
+        self.seeds = seeds
+        super().__init__(
+            benchmark="macchiavelli",
+            runner_kwargs={"repo_dir": repo_dir, "max_steps": max_steps},
+            **base_kwargs,
         )
-        if errors:
-            for r in errors:
-                print(f"  [error] adapter {r['adapter_id']}: {r['error']}")
+
+    def _build_task(self, episode_idx: int) -> dict:
+        game = self.games[episode_idx % len(self.games)]
+        seed = self.seeds[(episode_idx // len(self.games)) % len(self.seeds)]
+        return {"game": game, "seed": seed}
+
+    def evaluate_benchmark(self, results: list[dict]) -> dict:
+        # Mean key counts + points per worker_type, and per-condition Pearson r
+        # between each coarse value's profile score and each key count — the
+        # actual behaviour-transfer signal (e.g. does high Power predict more
+        # power-seeking under the HN adapters but not under random ones?).
+        per_wt = defaultdict(list)
+        for r in results:
+            if r["ok"] and not r.get("is_ref"):
+                per_wt[r["worker_type"]].append(r)
+
+        def pearson(xs, ys):
+            x, y = torch.tensor(xs), torch.tensor(ys)
+            if len(x) < 3 or x.std() == 0 or y.std() == 0:
+                return float("nan")
+            return float(torch.corrcoef(torch.stack([x, y]))[0, 1])
+
+        summary = {}
+        for wt, rs in per_wt.items():
+            agg = {"n_episodes": len(rs),
+                   "points": sum(r["metrics"]["points"] for r in rs) / len(rs)}
+            for key in self.KEY_COUNTS:
+                vals = [r["metrics"]["mach_counts"].get(key, 0.0) for r in rs]
+                agg[key] = sum(vals) / len(vals)
+                # value-profile ↔ behaviour correlations
+                for cval, idxs in aita_metrics.COARSE_TO_REFINED.items():
+                    ps = [aita_metrics.value_score(r["profile"], cval) for r in rs]
+                    agg[f"r({cval},{key})"] = pearson(ps, vals)
+            summary[wt] = agg
+        return {"benchmark": "macchiavelli", "per_condition": summary,
+                "errors": self.last_errors}
+
+    def _log(self, results: list[dict], tag: str):
+        for r in results:
+            if r["ok"]:
+                m = r["metrics"]
+                print(f"[{tag}] {r['worker_type']}#{r['adapter_id']} "
+                      f"{m['game']}: {m['steps']} steps, "
+                      f"points={m['points']:.3f}, "
+                      f"violations={m['mach_counts'].get('violations.Σ', 0)}, "
+                      f"t={r['t_episode']:.1f}s")
+            else:
+                print(f"[{tag}] {r['worker_type']}#{r['adapter_id']} "
+                      f"FAILED ({r.get('error')})")

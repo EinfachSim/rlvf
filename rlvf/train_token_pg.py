@@ -33,8 +33,7 @@ LAYER_TYPES     = ["q", "v"]
 DIMS            = {"q": [4096, 4096], "v": [1024, 4096]}
 PROFILE_DIM     = 19
 RANK            = 8
-WHITEN_INPUT    = True    # cold start: whiten the profile input (must match the pathwise runs
-                          # you compare against); warm start: inherited from the checkpoint
+WHITEN_INPUT    = True
 
 LR              = 3e-5
 GRAD_CLIP       = 1.0
@@ -74,9 +73,6 @@ ray.init(address="auto")
 print(f"Ray cluster resources: {ray.cluster_resources()}")
 
 print("Initialising HyperNetwork...")
-# The HN must be built to match the checkpoint it will load: a pathwise
-# checkpoint trained with a whitened input carries a "whiten" buffer and a
-# narrower first layer.
 _src = args.init_from or (sorted(Path(f"{LUSTRE}/{args.checkpoint_dir}").glob("hn_step_*.pt"))[-1:] or [None])[0]
 if _src:
     _sd = torch.load(str(_src), map_location="cpu")["model"]
@@ -116,7 +112,7 @@ if ckpts:
     ckpt = torch.load(str(ckpts[-1]), map_location=DEVICE)
     policy.load_state_dict(ckpt["model"], strict=False)
     optimizer.load_state_dict(ckpt["optimizer"])
-    start_step = ckpt["step"] + 1     # checkpoint N = weights after update N
+    start_step = ckpt["step"] + 1
     print(f"[train] Resumed from {ckpts[-1]} (continuing at step {start_step})")
 
 MASS_COEF = 0.1
@@ -142,7 +138,7 @@ env = RLVFEnv(
     eval_means="empirical",    # population prior (Schwartz & Cieciuch 2022, Table 5)
     rec_mode=args.rec_mode, mahal_cap=args.mahal_cap,
 )
-for _ in range(start_step):            # continue the profile stream on resume
+for _ in range(start_step):
     env.train_sampler.sample_batch(env.batch_size)
 print(f"Batch size: {env.batch_size}")
 
