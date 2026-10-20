@@ -13,6 +13,11 @@ Every conditioned condition also runs once with the eval prior's mean profile
 (the average person), the reference for the probability gain.
 Re-score a finished run without the GPU:  python recompute.py results/aita/raw_<stamp>.pkl
 
+AITA protocols (--protocols, default both, on the same workers / model load):
+  profiles  64 random profiles: alignment r, probability gain, specificity, lean
+  s2b       Survey-to-Behavior Table 2 protocol (s2b_eval.py): one value lowered
+            (and raised) at a time, gain vs. the base model, next to the paper's numbers
+
 Usage (from the bench folder, rlvf importable):
   python aita_eval.py --benchmark aita --dataset /path/aita_dataset_10_values_reduced.json \
       --hn pathwise=/path/hn_step_00215.pt --seed 1234
@@ -187,9 +192,10 @@ def main():
                          "verdict, and as many where it is the milder one")
     ap.add_argument("--verdicts", choices=["ternary", "binary"], default="ternary",
                     help="ternary = YTA/NTA/Neutral as in Nie et al. 2025")
-    ap.add_argument("--scoring", choices=["sequence", "first_token"], default="sequence",
-                    help="sequence = full-verdict log-likelihood; first_token = the paper's "
-                         "next-token probability (check the printed tokenization first)")
+    ap.add_argument("--scoring", choices=["sequence", "first_token"], default="first_token",
+                    help="first_token = the paper's next-token probability (validated against "
+                         "sequence scoring: r = 1.00 on the pilot); sequence = full-verdict "
+                         "log-likelihood")
     ap.add_argument("--n_boot", type=int, default=2000)
     ap.add_argument("--compare_to", default="prompted",
                     help="paired mean_r differences of every condition against this one")
@@ -203,6 +209,16 @@ def main():
     ap.add_argument("--random_b_scale", type=float, default=1.0)
     ap.add_argument("--random_d_scale", type=float, default=0.1)
     ap.add_argument("--random_d_mean", type=float, default=0.0)
+    ap.add_argument("--protocols", nargs="+", choices=["profiles", "s2b"],
+                    default=["profiles", "s2b"], help="AITA only; both share one model load")
+    ap.add_argument("--shift_sd", type=float, nargs="+", default=[2.0, 4.0],
+                    help="s2b: how far the target value is moved, in SD")
+    ap.add_argument("--directions", nargs="+", choices=["low", "high"], default=["low", "high"],
+                    help="s2b: lower (paper) and/or raise the target value")
+    ap.add_argument("--s2b_posts", choices=["target", "all"], default="target",
+                    help="s2b: all = also measure off-target change (~10x cost)")
+    ap.add_argument("--s2b_reference", choices=["base", "average"], default="base",
+                    help="s2b: base = untuned model (the paper's comparison)")
     ap.add_argument("--hn_module", default=HN_MODULE,
                     help="python module containing the HyperNetwork class")
     ap.add_argument("--out", default=None,
@@ -226,27 +242,66 @@ def main():
     args.out = args.out or f"results/{args.benchmark}"
 
     ray.init()
-    common = dict(worker_types=conditions, eval_size=args.eval_size,
-                  rng_seed=args.seed, num_workers=args.num_workers,
-                  eval_means=None if args.eval_means == "zero" else "empirical")
-    if args.benchmark == "aita":
-        env = AITAEnv(dataset_path=args.dataset, posts_per_side=args.posts_per_side,
-                      verdicts=args.verdicts, scoring=args.scoring,
-                      n_boot=args.n_boot, compare_to=args.compare_to, **common)
-    else:
-        env = PVQEnv(quest_path=args.quest_path, **common)
-    profiles = env.action_profiles            # (N + 1, 19): eval profiles + neutral reference
+    hn_acts = {c: load_hypernetwork(hns[c], "cpu", args.hn_module) for c in conditions if c in hns}
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    meta = {"args": vars(args), "conditions": conditions, "hn_checkpoints": hns}
+    protocols = args.protocols if args.benchmark == "aita" else ["profiles"]
 
+    common = dict(eval_size=args.eval_size, rng_seed=args.seed, num_workers=args.num_workers,
+                  eval_means=None if args.eval_means == "zero" else "empirical")
+    workers = None
+    if "profiles" in protocols:
+        if args.benchmark == "aita":
+            env = AITAEnv(dataset_path=args.dataset, posts_per_side=args.posts_per_side,
+                          verdicts=args.verdicts, scoring=args.scoring, n_boot=args.n_boot,
+                          compare_to=args.compare_to, worker_types=conditions, **common)
+        else:
+            env = PVQEnv(quest_path=args.quest_path, worker_types=conditions, **common)
+        workers = env.workers
+        run_profiles(env, conditions, hn_acts, args, out, stamp, meta)
+
+    if "s2b" in protocols:
+        from s2b_eval import S2BEnv
+        s2b_conds = [c for c in conditions if c != "random"]      # random adapters: no target
+        if args.s2b_reference == "base" and "base" not in s2b_conds:
+            s2b_conds = ["base"] + s2b_conds
+        env = S2BEnv(args.dataset, shift_sd=args.shift_sd, directions=args.directions,
+                     posts=args.s2b_posts, verdicts=args.verdicts, scoring=args.scoring,
+                     reference=args.s2b_reference, worker_types=s2b_conds,
+                     workers=workers, **{k: v for k, v in common.items() if k != "eval_size"})
+        actions, frozen = {}, {}
+        for c in s2b_conds:
+            if c in hn_acts:
+                act, A, B = hn_acts[c]
+                actions[c], frozen[c] = act(env.action_profiles), (A, B)
+            else:
+                actions[c] = None
+        t0 = time.perf_counter()
+        summary = env.step_batch(actions, frozen)
+        print(f"S2B protocol done in {(time.perf_counter() - t0) / 60:.1f} min")
+        s2b_meta = {**meta, "conditions": s2b_conds, "targets": env.targets}
+        with open(out / f"s2b_summary_{stamp}.json", "w") as f:
+            json.dump({**s2b_meta, **summary}, f, indent=2, default=float)
+        with open(out / f"s2b_raw_{stamp}.pkl", "wb") as f:
+            pickle.dump({**s2b_meta, "profiles": env.action_profiles.numpy(),
+                         "results": env.last_results}, f)
+        print(f"Saved to {out}/s2b_summary_{stamp}.json and s2b_raw_{stamp}.pkl")
+
+
+def run_profiles(env, conditions, hn_acts, args, out, stamp, meta):
+    profiles = env.action_profiles            # (N + 1, 19): eval profiles + reference
     # Build each condition's adapters on the driver (HNs are small).
     actions, frozen = {}, {}
     for c in conditions:
-        if c in hns:
-            act, A, B = load_hypernetwork(hns[c], "cpu", args.hn_module)
+        if c in hn_acts:
+            act, A, B = hn_acts[c]
             actions[c], frozen[c] = act(profiles), (A, B)
         else:
             actions[c] = None
     if "random" in conditions:
-        match = args.random_match or next(iter(hns), "none")
+        match = args.random_match or next(iter(hn_acts), "none")
         if match != "none":
             b, d = actions[match]
             b_all = torch.cat([v.flatten() for v in b.values()])
@@ -268,10 +323,6 @@ def main():
     print(f"Benchmark done in {(time.perf_counter() - t0) / 60:.1f} min")
 
     # Save: summary (json) + everything needed to recompute metrics (pickle).
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    meta = {"args": vars(args), "conditions": conditions, "hn_checkpoints": hns}
     with open(out / f"summary_{stamp}.json", "w") as f:
         json.dump({**meta, **eval_out}, f, indent=2, default=float)
     with open(out / f"raw_{stamp}.pkl", "wb") as f:

@@ -45,6 +45,7 @@ class BaseEnv(ABC):
         rank: int = 8,
         eval_means="empirical",   # population prior by default; None -> zero-mean
         num_workers: int = None,  # default: one per available GPU, at most one per condition
+        workers: list = None,     # reuse an existing pool (same benchmark + runner_kwargs)
     ):
         self.num_layers = num_layers
         self.layer_types = layer_types
@@ -63,13 +64,18 @@ class BaseEnv(ABC):
         print(f"[BenchEnv] {eval_size} eval profiles (seed {rng_seed}), "
               f"means={eval_means or 'zero'}")
 
-        n_gpu = int(ray.cluster_resources().get("GPU", 1))
-        self.num_workers = num_workers or max(1, min(n_gpu, len(self.worker_types)))
-        print(f"[BenchEnv] Spawning {self.num_workers} worker(s) for conditions "
-              f"{self.worker_types}...")
-        self.workers = [BaseWorker.remote(benchmark=benchmark, runner_kwargs=runner_kwargs)
-                        for _ in range(self.num_workers)]
-        print("[BenchEnv] All workers ready.")
+        if workers:
+            self.workers, self.num_workers = workers, len(workers)
+            print(f"[BenchEnv] Reusing {self.num_workers} worker(s) for conditions "
+                  f"{self.worker_types}")
+        else:
+            n_gpu = int(ray.cluster_resources().get("GPU", 1))
+            self.num_workers = num_workers or max(1, min(n_gpu, len(self.worker_types)))
+            print(f"[BenchEnv] Spawning {self.num_workers} worker(s) for conditions "
+                  f"{self.worker_types}...")
+            self.workers = [BaseWorker.remote(benchmark=benchmark, runner_kwargs=runner_kwargs)
+                            for _ in range(self.num_workers)]
+            print("[BenchEnv] All workers ready.")
 
     @property
     def action_profiles(self) -> torch.Tensor:
