@@ -36,8 +36,8 @@ class RLVFEnv(BaseEnv):
         verbose: bool = False,
         train_means=None,          # None -> zero-mean (uniform coverage of profile space)
         eval_means="empirical",    # "empirical" -> population prior (Schwartz & Cieciuch 2022, Table 5)
-        rec_mode: str = "mse",     # "mse" | "mahalanobis": reconstruction objective for gradients
-        mahal_cap: float = 10.0,   # max weight ratio weak/strong direction (None = uncapped)
+        rec_mode: str = "mse",     # "mse" | "mahalanobis": reconstruction objective for gradients, not used
+        mahal_cap: float = 10.0,   # max weight ratio weak/strong direction (None = uncapped), not used
     ):
         assert rec_mode in ("mse", "mahalanobis"), rec_mode
         self.rec_mode = rec_mode
@@ -62,13 +62,12 @@ class RLVFEnv(BaseEnv):
         self.last_kls = None
         self.last_digit_mass = None
         self.last_delta_fro = None
-        self.last_entropy = None   # mean entropy (nats) of the 6-digit answer dists
-        self.last_pmax = None      # mean max-prob over the 6 digits (1.0 = one-hot)
-        self.last_p_hat = None     # (n, 19) answered profiles of the last pool call
+        self.last_entropy = None
+        self.last_pmax = None
+        self.last_p_hat = None
         self.last_errors = 0
 
-        # Frozen VeRA matrices: kept here for reference, shipped to the
-        # workers ONCE (as numpy) at construction and cached there.
+
         self.A = A
         self.B = B
         A_np = {k: v.detach().cpu().numpy() for k, v in A.items()}
@@ -130,7 +129,7 @@ class RLVFEnv(BaseEnv):
     ) -> dict:
         """
         Run a batch of episodes on a fixed set of eval profiles.
-        `profiles` must be the SAME profiles the actions were generated from
+        `profiles` must be the same profiles the actions were generated from
         (default: self.eval_profiles). Returns diagnostics dict.
         """
         if profiles is None:
@@ -141,20 +140,20 @@ class RLVFEnv(BaseEnv):
         rewards = self._run_pool(action_batch, profiles, tag=tag)
         align = self.alignment_stats(profiles)
         return {
-            "eval_align_cross":  align["cross"],
-            "eval_r2_mean":      align["r2_mean"],
-            "eval_r2_max":       align["r2_max"],
-            "eval_phat_var":     align["phat_var"],
+            "eval_align_cross": align["cross"],
+            "eval_r2_mean": align["r2_mean"],
+            "eval_r2_max": align["r2_max"],
+            "eval_phat_var": align["phat_var"],
             "eval_reward_mean": rewards.mean().item(),
-            "eval_reward_std":  rewards.std().item(),
-            "eval_reward_min":  rewards.min().item(),
-            "eval_reward_max":  rewards.max().item(),
-            "eval_score_mean":  float(self.last_scores.mean().item()),
+            "eval_reward_std": rewards.std().item(),
+            "eval_reward_min": rewards.min().item(),
+            "eval_reward_max": rewards.max().item(),
+            "eval_score_mean": float(self.last_scores.mean().item()),
             "eval_score_disc_mean": float(self.last_scores_disc.mean().item()),
-            "eval_kl_mean":     float(self.last_kls.mean().item()),
-            "eval_digit_mass":  float(self.last_digit_mass.mean().item()),
-            "eval_entropy":     float(self.last_entropy.nanmean().item()),
-            "eval_pmax":        float(self.last_pmax.nanmean().item()),
+            "eval_kl_mean": float(self.last_kls.mean().item()),
+            "eval_digit_mass": float(self.last_digit_mass.mean().item()),
+            "eval_entropy": float(self.last_entropy.nanmean().item()),
+            "eval_pmax": float(self.last_pmax.nanmean().item()),
         }
 
     def step_batch_grad(
@@ -302,11 +301,11 @@ class RLVFEnv(BaseEnv):
         """
         How much of the answered profile tracks the target, across the batch.
         Uses self.last_p_hat from the most recent pool call.
-          cross    : mean_j mean_n p_hat[n,j] * p[n,j]  -- 0 for ANY constant
+          cross    : mean_j mean_n p_hat[n,j] * p[n,j], 0 for any constant
                      predictor, > 0 as soon as the HN tracks anything. Note
                      score = -(E[p_hat^2] + E[p^2] - 2*cross).
           r2_j     : corr(p_hat[:,j], p[:,j])^2 across the batch, per value.
-          phat_var : mean_j Var_n p_hat[n,j]  -- spread of answered profiles
+          phat_var : mean_j Var_n p_hat[n,j], spread of answered profiles
                      across the batch (0 for a constant predictor).
         """
         ph = self.last_p_hat
@@ -322,7 +321,7 @@ class RLVFEnv(BaseEnv):
         pc = p - p.mean(0, keepdim=True)
         num = (phc * pc).sum(0)
         den = (phc.pow(2).sum(0) * pc.pow(2).sum(0)).sqrt().clamp_min(1e-12)
-        r2 = (num / den).pow(2)                      # (19,)
+        r2 = (num / den).pow(2) # (19,)
         return {
             "cross": cross,
             "r2_mean": float(r2.mean().item()),
@@ -338,8 +337,7 @@ class RLVFEnv(BaseEnv):
         states,
         n: int,
     ) -> list[list[dict]]:
-        # A/B are NOT shipped per episode: the workers cached them at init.
-        # Distribute n episodes as evenly as possible across workers
+
         base  = n // self.num_workers
         extra = n % self.num_workers 
 
