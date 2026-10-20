@@ -50,18 +50,16 @@ assert np.allclose(EMPIRICAL_CORR, EMPIRICAL_CORR.T)
 # profiles that happen to be common in the population; only the empirical
 # correlation structure (which values go together) is imposed. The scale is a
 # single scalar: Schwartz & Cieciuch (2022) report no SDs for the 19 values
-# (lack of scalar invariance), and 0.8 is a typical SD of centered PVQ-RR
-# value scores in published samples. It mainly determines how far the
-# adapters must push the base model, so treat it as a hyperparameter.
+# (lack of scalar invariance), so we choose 0.8 as a realistic estimate, though
+# this is not really grounded in anything, thus a hyperparameter.
 # ---------------------------------------------------------------------------
 PROFILE_SD = 0.8
 CENTERED_MEANS = np.zeros(len(VALUE_NAMES))
 CENTERED_SDS = np.full(len(VALUE_NAMES), PROFILE_SD)
 
-# Optional, citable alternative for a *population-realistic* set of profiles
-# (e.g. an evaluation set): the median across the 49 groups of each centered
+# Population realistic set of profiles (e.g. an evaluation set): 
+# the median across the 49 groups of each centered
 # value's mean, Schwartz & Cieciuch (2022), Table 5. Same order as VALUE_NAMES.
-# Pass `means="empirical"` to the sampler to use it.
 CENTERED_MEANS_SC2022 = np.array([
     0.582, 0.597, -0.110, 0.228,      # SDT, SDA, ST, HE
     0.078, -1.403, -1.332, 0.047,     # AC, POD, POR, FAC
@@ -69,8 +67,8 @@ CENTERED_MEANS_SC2022 = np.array([
     -0.162, -0.205, -0.105, 0.502,    # COI, HUM, UNN, UNC
     0.370, 0.794, 0.726,              # UNT, BEC, BED
 ])
-# Centered values are deviations from the person's own mean over all 57 items
-# (3 items per value), so they sum to zero; group medians don't exactly.
+
+
 CENTERED_MEANS_SC2022 -= CENTERED_MEANS_SC2022.mean()
 
 
@@ -90,10 +88,11 @@ def _nearest_corr(corr: np.ndarray, eps: float = 1e-6) -> np.ndarray:
 def whitening_matrix(corr=None, sd=PROFILE_SD, eps=1e-6):
     """
     Fixed linear map W (19, k) such that z = p @ W has identity covariance
-    under the TRAINING sampler (zero mean, corr * sd^2, ipsatized). Directions
-    with (near-)zero variance -- ipsatization removes exactly one -- are
-    dropped, so k = 18 in practice. Whitening is w.r.t. the training
-    distribution only; profiles with non-zero means (e.g. the empirical eval
+    under the training sampler (zero mean, corr * sd^2, ipsatized). Directions
+    with (near-)zero variance are
+    dropped, so k = 18 in practice (because ipsatization removes one DOF).
+    Whitening is w.r.t. the training distribution only; 
+    profiles with non-zero means (e.g. the empirical eval
     set) are mapped by the same W and keep their offset.
     """
     corr = _nearest_corr(EMPIRICAL_CORR if corr is None else np.asarray(corr))
@@ -107,7 +106,7 @@ def whitening_matrix(corr=None, sd=PROFILE_SD, eps=1e-6):
     W = V[:, keep] / np.sqrt(w[keep])
     return W.astype(np.float32)          # (19, 18)
 
-
+#not used
 def mahalanobis_weight(corr=None, sd=PROFILE_SD, cap=10.0, eps=1e-6):
     """
     Symmetric PSD matrix M (19, 19) for the reweighted reconstruction loss
