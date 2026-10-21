@@ -67,8 +67,6 @@ class BenchWorker:
 
     def run_episode(self, profile_id, profile):
 
-        start = time.time()
-
         result = {}
 
         ids = list(self.benchmark_payloads.keys())
@@ -77,6 +75,7 @@ class BenchWorker:
         chunk_size = 20
         
         for name, agent in self.agents.items():
+            start = time.time()
             result[name] = {}
             #chunked forward
             for k in range(0, len(self.benchmark_payloads), chunk_size):
@@ -85,7 +84,7 @@ class BenchWorker:
                 chunk_ids = ids[k: k+chunk_size]
                 logits = agent.get_logits(chunk_posts, profile)[:, -1]
                 tmp = torch.log_softmax(logits.float(), dim=-1)
-                logp = tmp[:, self.verdict_ids].cpu()
+                logp = tmp[:, self.verdict_token_ids].cpu()
                 print(logp)
 
                 for id,log in zip(chunk_ids, logp):
