@@ -126,7 +126,9 @@ class HNAgent(BaseAgent):
     @torch.no_grad()
     def condition(self, profile):
         x = profile.to(self.device).unsqueeze(0)
-        b, d = self.hn.act(x)
+        _b, _d = self.hn.act(x)
+        b = {k: v[0] for k, v in _b.items()}
+        d = _d.reshape(1, len(TARGET_LAYERS), len(LAYER_TYPES), -1)[0]
         _apply_vera(self, b, d)
 
     def uncondition(self):
