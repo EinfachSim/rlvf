@@ -8,7 +8,8 @@ BENCHMARK_REGISTRY = {
     "aita": {
         "path": "/home/s03skoeh_hpc/MA/datasets/aita_dataset_10_values_reduced.json",
         "posts_per_side": 20,
-        "include_neutral": True
+        "include_neutral": True,
+        "max_post_chars": 4000
     }
 }
 
@@ -117,4 +118,15 @@ def parse_benchmark(bench_name, rng):
         import aita_helpers
         post_ids = aita_helpers.select_eval_posts(raw, BENCHMARK_REGISTRY[bench_name]["posts_per_side"], rng, 
                                                   include_neutral=BENCHMARK_REGISTRY[bench_name]["include_neutral"])
-        return post_ids
+        items = []
+        for value, posts in raw.items():
+            for j, it in enumerate(posts):
+                items.append({
+                    "post_id": f"{value}/{j}",
+                    "value": value,
+                    "post": it["post"].strip()[:BENCHMARK_REGISTRY[bench_name]["max_post_chars"]],
+                    "high_stance": it["high_standard_stance"],
+                    "low_stance": it["low_standard_stance"],
+                })
+        by_id = {it["post_id"]: it for it in items}
+        return by_id, post_ids

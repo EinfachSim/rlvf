@@ -16,7 +16,7 @@ AGENT_REGISTRY = {
 
 @ray.remote(num_gpus=1, num_cpus=8)
 class BenchWorker:
-    def __init__(self, conditions: dict):
+    def __init__(self, conditions: dict, benchmark_payloads: dict):
         self.device = "cuda:0"
 
         # loading model
@@ -43,6 +43,11 @@ class BenchWorker:
         # parse conditions to agent instances
         for k, v in conditions.items():
             self.agents[k] = AGENT_REGISTRY[k](**v, shared_kwargs=shared_args)
+
+        #posts indexed by id, shipped once to workers
+        self.benchmark_payloads = benchmark_payloads
+
+        print(self.benchmark_payloads.values()[0])
     
     def ready(self):
         True

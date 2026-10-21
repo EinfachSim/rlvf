@@ -13,13 +13,6 @@ CONDITION_REGISTRY = {
 class BenchEnv:
     def __init__(self, conditions: dict, num_workers=1, eval_size=64, benchmark="aita"):
 
-        n_gpu = int(ray.cluster_resources().get("GPU", 1))
-        self.num_workers = num_workers or max(1, min(n_gpu, len(self.worker_types)))
-        print(f"[BenchEnv] Spawning {self.num_workers} worker(s) for conditions {conditions.keys()}")
-        self.workers = [BenchWorker.remote(conditions) for _ in range(self.num_workers)]
-        ray.get([w.ready.remote() for w in self.workers]) 
-        print("[BenchEnv] All workers ready.")
-
         #preparing samples
         rng_seed = 1234
         self.rng = random.Random(rng_seed)
@@ -36,8 +29,16 @@ class BenchEnv:
 
         print(f"[BenchEnv] preparing {benchmark} benchmark payloads...")
         #prepare benchmark payloads
-        self.benchmark_payloads = parse_benchmark(benchmark, self.rng)
+        self.benchmark_payloads, self.benchmark_ids = parse_benchmark(benchmark, self.rng)
         print(f"[BenchEnv] {benchmark} benchmark payloads ready!")
+
+        #Spawn workers
+        n_gpu = int(ray.cluster_resources().get("GPU", 1))
+        self.num_workers = num_workers or max(1, min(n_gpu, len(self.worker_types)))
+        print(f"[BenchEnv] Spawning {self.num_workers} worker(s) for conditions {conditions.keys()}")
+        self.workers = [BenchWorker.remote(conditions, self.benchmark_payloads) for _ in range(self.num_workers)]
+        ray.get([w.ready.remote() for w in self.workers]) 
+        print("[BenchEnv] All workers ready.")
 
     def step_batch(self):
         ...
