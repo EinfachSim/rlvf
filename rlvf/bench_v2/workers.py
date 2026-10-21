@@ -51,6 +51,10 @@ class BenchWorker:
         True
 
     def run_episode(self, profile_id, profile):
-        print(profile_id, profile)
+
+        for name, agent in self.agents.items():
+            print(f"{name} working on profile {profile_id}...")
+            logits = agent.get_logits(profile)
+            print(logits)
     
         
