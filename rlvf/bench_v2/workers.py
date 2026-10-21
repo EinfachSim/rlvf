@@ -85,7 +85,6 @@ class BenchWorker:
                 logits = agent.get_logits(chunk_posts, profile)[:, -1]
                 tmp = torch.log_softmax(logits.float(), dim=-1)
                 logp = tmp[:, self.verdict_token_ids].cpu()
-                print(logp)
 
                 for id,log in zip(chunk_ids, logp):
                     result[name][id] = log
