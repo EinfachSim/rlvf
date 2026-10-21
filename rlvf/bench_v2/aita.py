@@ -23,6 +23,6 @@ out = Path(out)
 out.mkdir(parents=True, exist_ok=True)
 
 with open(out / f"raw_{stamp}.pkl", "wb") as f:
-    pickle.dump(aita_results)
+    pickle.dump(aita_results, f)
 
 print(f"[AITA] Done. Saved results to {out / f'raw_{stamp}.pkl'}")
