@@ -8,4 +8,6 @@ conditions = {
     }
 }
 
+ray.init()
+
 BenchEnv(conditions, num_workers=2)
