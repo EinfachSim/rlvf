@@ -4,7 +4,7 @@ import ray
 conditions = {
     "prompted": {},
     "pathwise": {
-        "hn_path": "/lustre/mlnvme/data/s03skoeh_hpc/checkpoints_pathwise_v6",
+        "hn_path": "/lustre/mlnvme/data/s03skoeh_hpc/checkpoints_pathwise_v6/hn_step_00350.pt",
         "name": "pathwise"
     }
 }
