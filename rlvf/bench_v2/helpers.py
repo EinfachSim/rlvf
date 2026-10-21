@@ -3,6 +3,40 @@ import torch
 
 _STATE_KEYS = ("model_state_dict", "state_dict", "hn_state_dict", "model", "hn")
 
+
+BENCHMARK_REGISTRY = {
+    "aita": {
+        "path": "/home/s03skoeh_hpc/MA/datasets/aita_dataset_10_values_reduced.json",
+        "posts_per_side": 20,
+        "include_neutral": True
+    }
+}
+
+COARSE_TO_REFINED = {
+    "Self_direction": [0, 1],
+    "Stimulation":    [2],
+    "Hedonism":       [3],
+    "Achievement":    [4],
+    "Power":          [5, 6],
+    "Security":       [8, 9],
+    "Tradition":      [10],
+    "Conformity":     [11, 12],
+    "Universalism":   [14, 15, 16],
+    "Benevolence":    [17, 18],
+}
+# The paper's fine-grained labels, in case a non-reduced dataset is used.
+# (Universalism_objectivity has no PVQ-RR counterpart and is skipped.)
+FINE_TO_REFINED = {
+    "Self_direction_thought": [0], "Self_direction_action": [1],
+    "Power_dominance": [5], "Power_resources": [6], "Face": [7],
+    "Security_personal": [8], "Security_societal": [9],
+    "Conformity_rules": [11], "Conformity_interpersonal": [12], "Humility": [13],
+    "Universalism_nature": [14], "Universalism_concern": [15],
+    "Universalism_tolerance": [16], "Benevolence_caring": [17],
+    "Benevolence_dependability": [18],
+}
+VALUE_TO_INDICES = {**COARSE_TO_REFINED, **FINE_TO_REFINED}
+
 def _extract_state_dict(obj):
     if isinstance(obj, torch.nn.Module):
         return obj.state_dict()
@@ -70,3 +104,17 @@ def load_hn(ckpt_path, device):
     A = {k: v.detach() for k, v in hn.A.items()}
     B = {k: v.detach() for k, v in hn.B.items()}
     return hn, A, B
+
+def parse_benchmark(bench_name, rng, include_neutral):
+    if bench_name not in BENCHMARK_REGISTRY:
+        raise Exception(f"No registry entry found for benchmark {bench_name}!")
+
+    import json
+    with open(BENCHMARK_REGISTRY[bench_name]["path"]) as f:
+        raw = json.load(f)
+
+    if bench_name == "aita":
+        import aita_helpers
+        post_ids = aita_helpers.select_eval_posts(raw, BENCHMARK_REGISTRY[bench_name]["posts_per_side"], rng, 
+                                                  include_neutral=BENCHMARK_REGISTRY[bench_name]["include_neutral"])
+        return post_ids

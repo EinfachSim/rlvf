@@ -43,6 +43,11 @@ class BenchWorker:
         # parse conditions to agent instances
         for k, v in conditions.items():
             self.agents[k] = AGENT_REGISTRY[k](**v, shared_kwargs=shared_args)
+    
     def ready(self):
         True
+
+    def run_episode_batch():
+        ...
+    
         
