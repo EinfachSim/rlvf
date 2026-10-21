@@ -50,7 +50,7 @@ class BenchWorker:
     def ready(self):
         True
 
-    def run_episode(profile_id, profile):
+    def run_episode(self, profile_id, profile):
         print(profile_id, profile)
     
         
