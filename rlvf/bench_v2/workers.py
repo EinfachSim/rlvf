@@ -83,10 +83,13 @@ class BenchWorker:
                 chunk_start = time.time()
                 chunk_posts = posts[k:k+chunk_size]
                 chunk_ids = ids[k: k+chunk_size]
-                logits = agent.get_logits(chunk_posts, profile)
+                logits = agent.get_logits(chunk_posts, profile)[:, -1]
+                tmp = torch.log_softmax(logits.float(), dim=-1)
+                logp = tmp[:, self.verdict_ids].cpu()
+                print(logp)
 
-                for id,log in zip(chunk_ids, logits):
-                    result[name][id] = log.float().cpu()
+                for id,log in zip(chunk_ids, logp):
+                    result[name][id] = log
                 print(f"Profile: {profile_id}, Condition: {name}, item {k}/{len(self.benchmark_payloads)}, time: {time.time() - chunk_start}")
             print(f"Profile: {profile_id}, Condition: {name}, finished in: {time.time() - start}")
         return {"profile_id": profile_id, "profile": profile.float().cpu(), "result": result}
