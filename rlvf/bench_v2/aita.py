@@ -18,7 +18,7 @@ aita_results = BenchEnv(conditions, num_workers=1, benchmark="aita", eval_size=2
 
 
 stamp = time.strftime("%Y%m%d-%H%M%S")
-out = "home/s03skoeh_hpc/MA/results"
+out = "/home/s03skoeh_hpc/MA/results"
 out = Path(out)
 out.mkdir(parents=True, exist_ok=True)
 
