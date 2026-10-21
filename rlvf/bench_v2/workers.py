@@ -76,6 +76,6 @@ class BenchWorker:
                     result[name][id] = log
                 print(f"Profile: {profile_id}, Condition: {name}, item {k}/{len(self.benchmark_payloads)}, time: {time.time() - chunk_start}")
             print(f"Profile: {profile_id}, Condition: {name}, finished in: {time.time() - start}")
-        return {"profile_id": profile_id, "result": result}
+        return {"profile_id": profile_id, "profile": profile, "result": result}
     
         
