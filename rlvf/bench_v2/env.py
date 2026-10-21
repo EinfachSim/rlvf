@@ -39,7 +39,7 @@ class BenchEnv:
 
         #distribute payloads to workers:
         num_posts_per_worker = len(self.benchmark_ids) // self.num_workers
-        payloads_per_worker = [{} for _ in self.num_workers]
+        payloads_per_worker = [{} for _ in range(self.num_workers)]
         k = 0
         for w in range(0, len(self.benchmark_ids), num_posts_per_worker):
             ids = self.benchmark_ids[w:w+num_posts_per_worker]
