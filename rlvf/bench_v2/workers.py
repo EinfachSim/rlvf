@@ -47,7 +47,7 @@ class BenchWorker:
         #posts indexed by id, shipped once to workers
         self.benchmark_payloads = benchmark_payloads
 
-        print(self.benchmark_payloads.values()[0])
+        print(list(self.benchmark_payloads.values())[0])
     
     def ready(self):
         True
