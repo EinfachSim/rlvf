@@ -105,7 +105,6 @@ class BaseAgent(ABC):
         """
         receives a batch of queries and returns logits of the answer tokens, conditioned on the profile
         """
-        print(profile)
         self.condition(profile)
         input_ids = self.tokenize(queries)
         input_ids, attn_mask = self.pad(input_ids)

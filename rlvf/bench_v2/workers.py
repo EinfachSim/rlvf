@@ -74,8 +74,8 @@ class BenchWorker:
 
                 for id,log in zip(chunk_ids, logits):
                     result[name][id] = log
-                print(f"Condition: {name}, item {k}/{len(self.benchmark_payloads)}, time: {time.time() - chunk_start}")
-            print(f"Condition: {name}, time: {time.time() - start}")
-        return result
+                print(f"Profile: {profile_id}, Condition: {name}, item {k}/{len(self.benchmark_payloads)}, time: {time.time() - chunk_start}")
+            print(f"Profile: {profile_id}, Condition: {name}, finished in: {time.time() - start}")
+        return {"profile_id": profile_id, "result": result}
     
         
