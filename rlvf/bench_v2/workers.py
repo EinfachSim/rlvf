@@ -4,6 +4,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import fcntl
 from rlvf.bench_v2.agents import *
 
+import time
+
 LOCK_PATH  = "/tmp/rlvf_model_load.lock"
 MODEL_PATH = "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/models/Mistral-7B-Instruct-v0.3"
 DTYPE = torch.float16
@@ -51,17 +53,27 @@ class BenchWorker:
         True
 
     def run_episode(self, profile_id, profile):
-        
-        posts = []
-        for id, it in self.benchmark_payloads.items():
-            posts.append(it["post"])
+
+        start = time.time()
+
+        result = {}
+
+        ids = list(self.benchmark_payloads.keys())
+        posts = [self.benchmark_payloads[i]["post"] for i in ids]
 
         chunk_size = 20
         
         for name, agent in self.agents.items():
+            result[name] = {}
             #chunked forward
-            for k in range(0, len(posts), chunk_size):
-                chunk = posts[k:k+chunk_size]
-                logits = agent.get_logits(chunk, profile)
+            for k in range(0, len(self.benchmark_payloads), chunk_size):
+                print(f"Condition: {name}, item {k}/{len(self.benchmark_payloads)}, time: {time.time() - start}")
+                chunk_posts = posts[k:k+chunk_size]
+                chunk_ids = ids[k: k+chunk_size]
+                logits = agent.get_logits(chunk_posts, profile)
+
+                for id,log in zip(chunk_ids, logits):
+                    result[name][id] = log
+            print(f"Condition: {name}, time: {time.time() - start}")
     
         
