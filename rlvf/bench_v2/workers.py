@@ -86,7 +86,7 @@ class BenchWorker:
                 logits = agent.get_logits(chunk_posts, profile)
 
                 for id,log in zip(chunk_ids, logits):
-                    result[name][id] = log[self.verdict_token_ids].float().cpu()
+                    result[name][id] = log.float().cpu()
                 print(f"Profile: {profile_id}, Condition: {name}, item {k}/{len(self.benchmark_payloads)}, time: {time.time() - chunk_start}")
             print(f"Profile: {profile_id}, Condition: {name}, finished in: {time.time() - start}")
         return {"profile_id": profile_id, "profile": profile.float().cpu(), "result": result}
