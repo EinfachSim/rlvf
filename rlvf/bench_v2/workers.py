@@ -87,7 +87,12 @@ class BenchWorker:
                 logp = tmp[:, self.verdict_token_ids].cpu()
 
                 for id,log in zip(chunk_ids, logp):
-                    result[name][id] = log
+                    result[name][id] = {
+                        "value": self.benchmark_payloads[id]["value"],
+                        "hi": self.benchmark_payloads[id]["high_stance"],
+                        "lo": self.benchmark_payloads[id]["low_stance"],
+                        "logits": log
+                    }
                 print(f"Profile: {profile_id}, Condition: {name}, item {k}/{len(self.benchmark_payloads)}, time: {time.time() - chunk_start}")
             print(f"Profile: {profile_id}, Condition: {name}, finished in: {time.time() - start}")
         return {"profile_id": profile_id, "profile": profile.float().cpu(), "result": result}
