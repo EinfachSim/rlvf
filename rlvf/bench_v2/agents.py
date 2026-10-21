@@ -105,6 +105,7 @@ class BaseAgent(ABC):
         """
         receives a batch of queries and returns logits of the answer tokens, conditioned on the profile
         """
+        print(profile)
         self.condition(profile)
         input_ids = self.tokenize(queries)
         input_ids, attn_mask = self.pad(input_ids)
@@ -123,7 +124,8 @@ class HNAgent(BaseAgent):
 
     @torch.no_grad()
     def condition(self, profile):
-        b, d = self.hn.act(profile.to(self.device))
+        x = profile.to(self.device).unsqueeze(0)
+        b, d = self.hn.act(x)
         _apply_vera(self, b, d)
 
     def uncondition(self):
