@@ -143,4 +143,4 @@ def parse_benchmark(bench_name, rng):
         for id in post_ids:
             by_id_filtered[id] = by_id[id]
         
-        return by_id_filtered, post_ids
+        return by_id_filtered, post_ids, ["YTA", "NTA", "Neutral"]

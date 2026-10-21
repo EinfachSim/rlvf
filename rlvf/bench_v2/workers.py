@@ -18,7 +18,7 @@ AGENT_REGISTRY = {
 
 @ray.remote(num_gpus=1, num_cpus=8)
 class BenchWorker:
-    def __init__(self, conditions: dict, benchmark_payloads: dict):
+    def __init__(self, conditions: dict, benchmark_payloads: dict, verdict_tokens: list[str]):
         self.device = "cuda:0"
 
         # loading model
@@ -48,6 +48,19 @@ class BenchWorker:
 
         #posts indexed by id, shipped once to workers
         self.benchmark_payloads = benchmark_payloads
+
+        #get verdict token ids
+        self.verdict_token_ids = self.get_verdict_token_ids(verdict_tokens)
+
+    def get_verdict_token_ids(self, verdicts):
+        ids = []
+        for v in verdicts:
+            toks = self.tokenizer(" " + v, add_special_tokens=False).input_ids
+            toks = [t for t in toks if self.tokenizer.convert_ids_to_tokens(t) not in ("▁", " ")] or toks
+            ids.append(toks[0])
+            print(f"{v!r} -> first token {self.tokenizer.convert_ids_to_tokens(toks[0])!r} (id {toks[0]})")
+        assert len(set(ids)) == len(ids), f"verdicts share a first token: {ids}"
+        return ids
     
     def ready(self):
         True
@@ -73,9 +86,9 @@ class BenchWorker:
                 logits = agent.get_logits(chunk_posts, profile)
 
                 for id,log in zip(chunk_ids, logits):
-                    result[name][id] = log
+                    result[name][id] = log[self.verdict_token_ids].float().cpu()
                 print(f"Profile: {profile_id}, Condition: {name}, item {k}/{len(self.benchmark_payloads)}, time: {time.time() - chunk_start}")
             print(f"Profile: {profile_id}, Condition: {name}, finished in: {time.time() - start}")
-        return {"profile_id": profile_id, "profile": profile, "result": result}
+        return {"profile_id": profile_id, "profile": profile.float().cpu(), "result": result}
     
         
