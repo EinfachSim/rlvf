@@ -45,7 +45,6 @@ class BenchWorker:
         # parse conditions to agent instances
         for k, v in conditions.items():
             self.agents[k] = AGENT_REGISTRY[k](**v, shared_kwargs=shared_args)
-        print(self.agents)
 
         #posts indexed by id, shipped once to workers
         self.benchmark_payloads = benchmark_payloads
@@ -68,13 +67,14 @@ class BenchWorker:
             result[name] = {}
             #chunked forward
             for k in range(0, len(self.benchmark_payloads), chunk_size):
-                print(f"Condition: {name}, item {k}/{len(self.benchmark_payloads)}, time: {time.time() - start}")
+                chunk_start = time.time()
                 chunk_posts = posts[k:k+chunk_size]
                 chunk_ids = ids[k: k+chunk_size]
                 logits = agent.get_logits(chunk_posts, profile)
 
                 for id,log in zip(chunk_ids, logits):
                     result[name][id] = log
+                print(f"Condition: {name}, item {k}/{len(self.benchmark_payloads)}, time: {time.time() - chunk_start}")
             print(f"Condition: {name}, time: {time.time() - start}")
         return result
     

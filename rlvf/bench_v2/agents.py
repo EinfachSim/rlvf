@@ -108,7 +108,7 @@ class BaseAgent(ABC):
         self.condition(profile)
         input_ids = self.tokenize(queries)
         input_ids, attn_mask = self.pad(input_ids)
-        logits = self.model(input_ids=input_ids.to(self.device), attention_mask=attn_mask.to(self.device), use_cache=False, num_logits_to_keep=1).logits
+        logits = self.model(input_ids=input_ids.to(self.device), attention_mask=attn_mask.to(self.device), use_cache=False, logits_to_keep=1).logits
         self.uncondition()
         return logits
     
