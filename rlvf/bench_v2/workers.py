@@ -59,8 +59,9 @@ class BenchWorker:
         chunk_size = 20
         
         for name, agent in self.agents.items():
+            #chunked forward
             for k in range(0, len(posts), chunk_size):
                 chunk = posts[k:k+chunk_size]
-                logits = agent.get_logits(posts, profile)
+                logits = agent.get_logits(chunk, profile)
     
         
