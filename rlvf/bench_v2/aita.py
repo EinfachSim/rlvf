@@ -11,4 +11,4 @@ conditions = {
 
 ray.init()
 
-BenchEnv(conditions, num_workers=2)
+BenchEnv(conditions, num_workers=1)

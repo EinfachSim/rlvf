@@ -14,4 +14,5 @@ class BenchEnv:
         self.num_workers = num_workers or max(1, min(n_gpu, len(self.worker_types)))
         print(f"[BenchEnv] Spawning {self.num_workers} worker(s) for conditions {conditions.keys()}")
         self.workers = [BenchWorker.remote(conditions) for _ in range(self.num_workers)]
+        ray.get([w.ready.remote() for w in self.workers]) 
         print("[BenchEnv] All workers ready.")

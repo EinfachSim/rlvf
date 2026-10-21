@@ -44,4 +44,6 @@ class BenchWorker:
         for k, v in conditions.items():
             cfg = dict(v, **shared_args)
             self.agents[k] = AGENT_REGISTRY[k](**cfg)
+    def ready(self):
+        True
         
