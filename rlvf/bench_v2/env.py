@@ -38,20 +38,13 @@ class BenchEnv:
         print(f"[BenchEnv] Spawning {self.num_workers} worker(s) for conditions {conditions.keys()}")
 
         #distribute payloads to workers:
-        num_posts_per_worker = len(self.benchmark_ids) // self.num_workers
-        payloads_per_worker = [{} for _ in range(self.num_workers)]
-        k = 0
-        for w in range(0, len(self.benchmark_ids), num_posts_per_worker):
-            ids = self.benchmark_ids[w:w+num_posts_per_worker]
-            tmp = {}
-            for id in ids:
-                tmp[id] = self.benchmark_payloads[id]
-            payloads_per_worker[k].update(tmp)
-            k = (k+1) % self.num_workers
-
-        self.workers = [BenchWorker.remote(conditions, payloads_per_worker[i]) for i in range(self.num_workers)]
+        payloads_ref = ray.put(self.benchmark_payloads)
+        self.workers = [BenchWorker.remote(conditions, payloads_ref) for _ in range(self.num_workers)]
         ray.get([w.ready.remote() for w in self.workers])
         print("[BenchEnv] All workers ready.")
 
     def step_batch(self):
-        ...
+        episodes = [{"profile_id": i, "profile": p} for i, p in enumerate(self.eval_profiles)]
+        pool = ray.util.ActorPool(self.workers)
+        results = list(pool.map_unordered(lambda w, ep: w.run_episode.remote(**ep), episodes))
+        return sorted(results, key=lambda r: r["profile_id"])
