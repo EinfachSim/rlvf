@@ -14,7 +14,7 @@ conditions = {
 
 ray.init()
 
-aita_results = BenchEnv(conditions, num_workers=1, benchmark="aita", eval_size=32).step_batch()
+aita_results = BenchEnv(conditions, num_workers=3, benchmark="aita", eval_size=32).step_batch()
 
 
 stamp = time.strftime("%Y%m%d-%H%M%S")
