@@ -121,6 +121,7 @@ class HNAgent(BaseAgent):
         super().__init__(**shared_kwargs)
         self.hn, self.A, self.B = load_hn(hn_path, self.device)
         self.name = name
+        self._hooks = []
 
     @torch.no_grad()
     def condition(self, profile):
