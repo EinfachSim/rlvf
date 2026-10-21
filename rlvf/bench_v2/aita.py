@@ -1,4 +1,5 @@
 from rlvf.bench_v2.env import BenchEnv
+import ray
 
 conditions = {
     "prompted": {},
