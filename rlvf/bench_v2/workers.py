@@ -53,8 +53,11 @@ class BenchWorker:
     def run_episode(self, profile_id, profile):
 
         for name, agent in self.agents.items():
+            posts = []
             for id, it in self.benchmark_payloads.items():
-                print(it)
-                logits = agent.get_logits(profile)
+                posts.append(it["post"])
+
+            print(posts[:10])
+            logits = agent.get_logits(posts, profile)
     
         
