@@ -11,4 +11,4 @@ conditions = {
 
 ray.init()
 
-BenchEnv(conditions, num_workers=1, benchmark="aita").step_batch()
+BenchEnv(conditions, num_workers=1, benchmark="aita", eval_size=2).step_batch()

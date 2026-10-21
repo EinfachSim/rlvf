@@ -129,4 +129,8 @@ def parse_benchmark(bench_name, rng):
                     "low_stance": it["low_standard_stance"],
                 })
         by_id = {it["post_id"]: it for it in items}
-        return by_id, post_ids
+        by_id_filtered = {}
+        for id in post_ids:
+            by_id_filtered[id] = by_id[id]
+        
+        return by_id_filtered, post_ids
