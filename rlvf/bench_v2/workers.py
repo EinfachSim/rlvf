@@ -75,5 +75,6 @@ class BenchWorker:
                 for id,log in zip(chunk_ids, logits):
                     result[name][id] = log
             print(f"Condition: {name}, time: {time.time() - start}")
+        return result
     
         
