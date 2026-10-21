@@ -55,11 +55,12 @@ def load_hn(ckpt_path, device):
       A, B: the frozen VeRA matrices stored in the HN (its A/B parameters).
     """
 
-    sd = _extract_state_dict(torch.load(ckpt_path, map_location=device,
+    sd = _extract_state_dict(torch.load(ckpt_path, map_location="cpu",
                                         weights_only=False))
     cfg = _infer_hn_config(sd)
-    hn = HyperNetwork(**cfg).to(device)
+    hn = HyperNetwork(**cfg)
     result = hn.load_state_dict(sd, strict=True)
+    hn.to(device)
     assert not result.missing_keys and not result.unexpected_keys, result
     hn.eval()
     print(f"[HN] {ckpt_path}: L={cfg['num_layers']} types={cfg['layer_types']} "
