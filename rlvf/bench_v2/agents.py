@@ -94,7 +94,7 @@ class BaseAgent(ABC):
 
     def pad(self, input_ids_list):
         max_len = max(len(s) for s in input_ids_list)
-        input_ids = torch.full((len(input_ids_list), max_len), self.tokenizer.pad_id, dtype=torch.long)
+        input_ids = torch.full((len(input_ids_list), max_len), self.tokenizer.pad_token_id, dtype=torch.long)
         attn = torch.zeros_like(input_ids)
         for i, s in enumerate(input_ids_list):
             input_ids[i, max_len - len(s):] = torch.tensor(s)
