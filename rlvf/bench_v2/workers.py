@@ -50,7 +50,7 @@ class BenchWorker:
     def ready(self):
         True
 
-    def run_episode(payload):
-        print(payload)
+    def run_episode(profile_id, profile):
+        print(profile_id, profile)
     
         
