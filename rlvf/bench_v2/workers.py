@@ -45,6 +45,7 @@ class BenchWorker:
         # parse conditions to agent instances
         for k, v in conditions.items():
             self.agents[k] = AGENT_REGISTRY[k](**v, shared_kwargs=shared_args)
+        print(self.agents)
 
         #posts indexed by id, shipped once to workers
         self.benchmark_payloads = benchmark_payloads
