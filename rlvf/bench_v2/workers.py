@@ -42,7 +42,7 @@ class BenchWorker:
         shared_args = {"model": self.model, "tokenizer": self.tokenizer, "device": self.device}
         # parse conditions to agent instances
         for k, v in conditions.items():
-            self.agents[k] = AGENT_REGISTRY[k](**v, shared_args=shared_args)
+            self.agents[k] = AGENT_REGISTRY[k](**v, shared_kwargs=shared_args)
     def ready(self):
         True
         
