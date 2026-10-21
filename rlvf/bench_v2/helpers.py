@@ -105,7 +105,7 @@ def load_hn(ckpt_path, device):
     B = {k: v.detach() for k, v in hn.B.items()}
     return hn, A, B
 
-def parse_benchmark(bench_name, rng, include_neutral):
+def parse_benchmark(bench_name, rng):
     if bench_name not in BENCHMARK_REGISTRY:
         raise Exception(f"No registry entry found for benchmark {bench_name}!")
 
