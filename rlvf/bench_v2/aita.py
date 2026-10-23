@@ -13,12 +13,13 @@ conditions = {
     "warmstart": {
         "hn_path": "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/checkpoints_sharpening_v8/hn_step_00155.pt",
         "name": "warmstart"
-    }
+    },
+    "base": {}
 }
 
 ray.init()
 
-aita_results = BenchEnv(conditions, num_workers=3, benchmark="aita", eval_size=32).step_batch()
+aita_results = BenchEnv(conditions, num_workers=3, benchmark="aita", eval_size=128).step_batch()
 
 
 stamp = time.strftime("%Y%m%d-%H%M%S")

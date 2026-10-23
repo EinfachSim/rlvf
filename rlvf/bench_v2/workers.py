@@ -15,6 +15,7 @@ AGENT_REGISTRY = {
     "pathwise": HNAgent,
     "prompted": PromptedAgent,
     "warmstart": HNAgent,
+    "base": BaseAgent,
 }
 
 @ray.remote(num_gpus=1, num_cpus=8)
