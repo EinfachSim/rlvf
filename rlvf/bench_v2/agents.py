@@ -56,7 +56,7 @@ def render_profile_prompt(profile: list[float]) -> str:
 
 class BaseAgent(ABC):
 
-    def __init__(self, model, tokenizer, device="cpu", shared_kwargs=None):
+    def __init__(self, model, tokenizer, device="cpu"):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
@@ -143,6 +143,11 @@ class PromptedAgent(BaseAgent):
 
     def condition(self, profile):
         self.system_prompt = render_profile_prompt(profile)
+
+class BaselineAgent(BaseAgent):
+    def __init__(self, shared_kwargs):
+        super().__init__(**shared_kwargs)
+        self.name = "baseline"
 
 
     
