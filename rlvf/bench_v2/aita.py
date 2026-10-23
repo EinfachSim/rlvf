@@ -7,7 +7,7 @@ import pickle
 conditions = {
     "prompted": {}, #doesnt need any kwargs
     "pathwise": {
-        "hn_path": "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/checkpoints_pathwise_v6/hn_step_00350.pt",
+        "hn_path": "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/checkpoints_pathwise_v6/hn_step_00570.pt",
         "name": "pathwise"
     },
     "warmstart": {
