@@ -13,7 +13,8 @@ DTYPE = torch.float16
 
 AGENT_REGISTRY = {
     "pathwise": HNAgent,
-    "prompted": PromptedAgent
+    "prompted": PromptedAgent,
+    "warmstart": HNAgent,
 }
 
 @ray.remote(num_gpus=1, num_cpus=8)
