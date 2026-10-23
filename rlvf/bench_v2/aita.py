@@ -9,6 +9,10 @@ conditions = {
     "pathwise": {
         "hn_path": "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/checkpoints_pathwise_v6/hn_step_00350.pt",
         "name": "pathwise"
+    },
+    "warmstart": {
+        "hn_path": "/lustre/mlnvme/data/s03skoeh_hpc-rlvf/checkpoints_sharpening_v8/hn_step_00155.pt",
+        "name": "warmstart"
     }
 }
 
