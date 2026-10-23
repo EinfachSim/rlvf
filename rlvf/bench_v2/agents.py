@@ -56,7 +56,7 @@ def render_profile_prompt(profile: list[float]) -> str:
 
 class BaseAgent(ABC):
 
-    def __init__(self, model, tokenizer, device="cpu"):
+    def __init__(self, model, tokenizer, device="cpu", shared_kwargs=None):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
