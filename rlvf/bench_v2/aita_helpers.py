@@ -65,6 +65,11 @@ def select_eval_posts(raw: dict, posts_per_side: int, rng,
         if value not in VALUE_TO_INDICES:
             print(f"[aita_metrics] skipping value {value!r}: no PVQ-RR counterpart")
             continue
+
+        if posts_per_side is None:
+            post_ids.extend(f"{value}/{j}" for j, it in enumerate(posts) if _usable(it, include_neutral))
+            continue
+        
         side = {1: [], -1: []}
         for j, it in enumerate(posts):
             if _usable(it, include_neutral):
