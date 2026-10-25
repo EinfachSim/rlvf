@@ -61,9 +61,9 @@ class BenchEnv:
         print("[BenchEnv] All workers ready.")
 
     def step_batch(self):
-        episodes = [{"profile_id": i, "profile": p, "type": "sampled"} for i, p in enumerate(self.eval_profiles)]
+        episodes = [{"profile_id": i, "profile": p, "profile_type": "sampled"} for i, p in enumerate(self.eval_profiles)]
         if self.include_s2b:
-            s2b_eps = [{"profile_id": i, "profile": p, "type": "s2b"} for i, p in enumerate(self.s2b_profiles)]
+            s2b_eps = [{"profile_id": i, "profile": p, "profile_type": "s2b"} for i, p in enumerate(self.s2b_profiles)]
             episodes += s2b_eps
         pool = ray.util.ActorPool(self.workers)
         results = list(pool.map_unordered(lambda w, ep: w.run_episode.remote(**ep), episodes))
