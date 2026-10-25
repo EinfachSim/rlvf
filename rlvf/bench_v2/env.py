@@ -2,7 +2,7 @@ import torch
 import ray
 from agents import *
 from workers import BenchWorker
-from rlvf.data import ValueProfileSampler
+from rlvf.data import ValueProfileSampler, COARSE_TO_REFINED, COARSE_VALUE_NAMES
 from rlvf.bench_v2.helpers import parse_benchmark
 import random
 
@@ -10,8 +10,17 @@ CONDITION_REGISTRY = {
     "prompted": PromptedAgent,
     "hn": ""
 }
+
+C_LOW = -2.0
+
+#downregulate value X by setting it to C_LOW as in s2b
+def downregulate(X, ref, c = C_LOW):
+    p = ref.copy()
+    p[COARSE_TO_REFINED[X]] = c
+    return p - p.mean() #reipsatization
+
 class BenchEnv:
-    def __init__(self, conditions: dict, num_workers=1, eval_size=64, benchmark="aita"):
+    def __init__(self, conditions: dict, num_workers=1, eval_size=64, benchmark="aita", include_s2b=False):
 
         #preparing samples
         rng_seed = 1234
@@ -22,8 +31,15 @@ class BenchEnv:
         self.eval_profiles = torch.tensor(eval_np, dtype=torch.float32)
 
         #reference: mean profile in the population
-        ref = torch.tensor(sampler.means, dtype=torch.float32)[None]
-        self.ref_profile = ref - ref.mean(1, keepdim=True)
+        if include_s2b:
+            ref = torch.tensor(sampler.means, dtype=torch.float32)[None]
+            self.ref_profile = ref - ref.mean(1, keepdim=True)
+            #downregulate each value by setting it to C_LOW
+            profiles = []
+            for value in COARSE_VALUE_NAMES:
+                p = downregulate(ref, value)
+                profiles.append(p)
+            profiles = torch.tensor(profiles, dtype=torch.float32)
 
         print(f"[BenchEnv] {eval_size} eval profiles (seed {rng_seed}), means=empirical")
 

@@ -11,6 +11,21 @@ VALUE_NAMES = [
     "Univ-Tolerance", "Benev-Care", "Benev-Dep",
 ]
 
+COARSE_TO_REFINED = {
+    "Self_direction": [0, 1],
+    "Stimulation":    [2],
+    "Hedonism":       [3],
+    "Achievement":    [4],
+    "Power":          [5, 6],
+    "Security":       [8, 9],
+    "Tradition":      [10],
+    "Conformity":     [11, 12],
+    "Universalism":   [14, 15, 16],
+    "Benevolence":    [17, 18],
+}
+
+COARSE_VALUE_NAMES = list(COARSE_TO_REFINED.keys())
+
 # ---------------------------------------------------------------------------
 # Empirical correlation matrix of the 19 *centered* (ipsatized) values.
 # Schwartz & Cieciuch (2022), Table S10: pooled correlation matrix across
