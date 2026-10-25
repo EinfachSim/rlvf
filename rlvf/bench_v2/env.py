@@ -31,6 +31,7 @@ class BenchEnv:
         self.eval_profiles = torch.tensor(eval_np, dtype=torch.float32)
 
         #reference: mean profile in the population
+        self.include_s2b = include_s2b
         if include_s2b:
             ref = torch.tensor(sampler.means, dtype=torch.float32)
             ref = ref - ref.mean()
@@ -39,9 +40,7 @@ class BenchEnv:
             for value in COARSE_VALUE_NAMES:
                 p = downregulate(ref, value)
                 s2b_profiles.append(p)
-            s2b_profiles = torch.vstack(s2b_profiles)
-
-        self.eval_profiles = torch.cat([self.eval_profiles, s2b_profiles])
+            self.s2b_profiles = torch.vstack(s2b_profiles)
 
         print(f"[BenchEnv] {eval_size} eval profiles (seed {rng_seed}), means=empirical")
 
@@ -62,7 +61,10 @@ class BenchEnv:
         print("[BenchEnv] All workers ready.")
 
     def step_batch(self):
-        episodes = [{"profile_id": i, "profile": p} for i, p in enumerate(self.eval_profiles)]
+        episodes = [{"profile_id": i, "profile": p, "type": "sampled"} for i, p in enumerate(self.eval_profiles)]
+        if self.include_s2b:
+            s2b_eps = [{"profile_id": i, "profile": p, "type": "s2b"} for i, p in enumerate(self.s2b_profiles)]
+            episodes += s2b_eps
         pool = ray.util.ActorPool(self.workers)
         results = list(pool.map_unordered(lambda w, ep: w.run_episode.remote(**ep), episodes))
         return sorted(results, key=lambda r: r["profile_id"])
