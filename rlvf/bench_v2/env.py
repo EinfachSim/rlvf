@@ -14,8 +14,8 @@ CONDITION_REGISTRY = {
 C_LOW = -2.0
 
 #downregulate value X by setting it to C_LOW as in s2b
-def downregulate(X, ref, c = C_LOW):
-    p = ref.copy()
+def downregulate(ref, X, c = C_LOW):
+    p = ref.clone()
     p[COARSE_TO_REFINED[X]] = c
     return p - p.mean() #reipsatization
 
@@ -32,14 +32,16 @@ class BenchEnv:
 
         #reference: mean profile in the population
         if include_s2b:
-            ref = torch.tensor(sampler.means, dtype=torch.float32)[None]
-            self.ref_profile = ref - ref.mean(1, keepdim=True)
+            ref = torch.tensor(sampler.means, dtype=torch.float32)
+            ref = ref - ref.mean()
             #downregulate each value by setting it to C_LOW
-            profiles = []
+            s2b_profiles = [ref]
             for value in COARSE_VALUE_NAMES:
                 p = downregulate(ref, value)
-                profiles.append(p)
-            profiles = torch.tensor(profiles, dtype=torch.float32)
+                s2b_profiles.append(p)
+            s2b_profiles = torch.vstack(s2b_profiles)
+
+        self.eval_profiles = torch.cat([self.eval_profiles, s2b_profiles])
 
         print(f"[BenchEnv] {eval_size} eval profiles (seed {rng_seed}), means=empirical")
 
