@@ -20,7 +20,7 @@ def downregulate(ref, X, c = C_LOW):
     return p - p.mean() #reipsatization
 
 class BenchEnv:
-    def __init__(self, conditions: dict, num_workers=1, eval_size=64, benchmark="aita", include_s2b=False):
+    def __init__(self, conditions: dict, num_workers=1, eval_size=64, benchmark="aita", include_s2b=False, s2b_only=False):
 
         #preparing samples
         rng_seed = 1234
@@ -32,6 +32,7 @@ class BenchEnv:
 
         #reference: mean profile in the population
         self.include_s2b = include_s2b
+        self.s2b_only = s2b_only
         if include_s2b:
             ref = torch.tensor(sampler.means, dtype=torch.float32)
             ref = ref - ref.mean()
@@ -40,7 +41,10 @@ class BenchEnv:
             for value in COARSE_VALUE_NAMES:
                 p = downregulate(ref, value)
                 s2b_profiles.append(p)
-            self.s2b_profiles = torch.vstack(s2b_profiles)
+            if s2b_only:
+                self.eval_profiles = torch.vstack(s2b_profiles)
+            else:
+                self.s2b_profiles = torch.vstack(s2b_profiles)
 
         print(f"[BenchEnv] {eval_size} eval profiles (seed {rng_seed}), means=empirical")
 
@@ -61,10 +65,13 @@ class BenchEnv:
         print("[BenchEnv] All workers ready.")
 
     def step_batch(self):
-        episodes = [{"profile_id": i, "profile": p, "profile_type": "sampled"} for i, p in enumerate(self.eval_profiles)]
-        if self.include_s2b:
-            s2b_eps = [{"profile_id": i, "profile": p, "profile_type": "s2b"} for i, p in enumerate(self.s2b_profiles)]
-            episodes += s2b_eps
+        if self.s2b_only:
+            episodes = [{"profile_id": i, "profile": p, "profile_type": "s2b"} for i, p in enumerate(self.eval_profiles)]
+        else:
+            episodes = [{"profile_id": i, "profile": p, "profile_type": "sampled"} for i, p in enumerate(self.eval_profiles)]
+            if self.include_s2b:
+                s2b_eps = [{"profile_id": i, "profile": p, "profile_type": "s2b"} for i, p in enumerate(self.s2b_profiles)]
+                episodes += s2b_eps
         pool = ray.util.ActorPool(self.workers)
         results = list(pool.map_unordered(lambda w, ep: w.run_episode.remote(**ep), episodes))
         return sorted(results, key=lambda r: r["profile_id"])
