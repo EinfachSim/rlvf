@@ -67,7 +67,7 @@ class BenchWorker:
     def ready(self):
         True
 
-    def run_episode(self, profile_id, profile):
+    def run_episode(self, profile_id, profile, profile_type):
 
         result = {}
 
@@ -95,8 +95,8 @@ class BenchWorker:
                         "lo": self.benchmark_payloads[id]["low_stance"],
                         "logits": log
                     }
-                print(f"Profile: {profile_id}, Condition: {name}, item {k}/{len(self.benchmark_payloads)}, time: {time.time() - chunk_start}")
-            print(f"Profile: {profile_id}, Condition: {name}, finished in: {time.time() - start}")
-        return {"profile_id": profile_id, "profile": profile.float().cpu(), "result": result}
+                print(f"Profile: {profile_id} (type: {profile_type}), Condition: {name}, item {k}/{len(self.benchmark_payloads)}, time: {time.time() - chunk_start}")
+            print(f"Profile: {profile_id} (type: {profile_type}), Condition: {name}, finished in: {time.time() - start}")
+        return {"profile_id": profile_id, "profile": profile.float().cpu(), "type": profile_type, "result": result}
     
         
