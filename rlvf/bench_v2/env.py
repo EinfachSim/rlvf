@@ -12,9 +12,10 @@ CONDITION_REGISTRY = {
 }
 
 C_LOW = -2.0
+C_HIGH = 2.0
 
-#downregulate value X by setting it to C_LOW as in s2b
-def downregulate(ref, X, c = C_LOW):
+#down-/upregulate value X by setting it to C_LOW as in s2b
+def regulate(ref, X, c):
     p = ref.clone()
     p[COARSE_TO_REFINED[X]] = c
     return p - p.mean() #reipsatization
@@ -38,9 +39,14 @@ class BenchEnv:
             ref = ref - ref.mean()
             #downregulate each value by setting it to C_LOW
             s2b_profiles = [ref]
+            down = []
+            up = []
             for value in COARSE_VALUE_NAMES:
-                p = downregulate(ref, value)
-                s2b_profiles.append(p)
+                p_down = regulate(ref, value, C_LOW)
+                p_up = regulate(ref, value, C_HIGH)
+                down.append(p_down)
+                up.append(p_up)
+            s2b_profiles += (down + up)
             if s2b_only:
                 self.eval_profiles = torch.vstack(s2b_profiles)
             else:
