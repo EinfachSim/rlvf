@@ -158,7 +158,7 @@ def parse_benchmark(bench_name, rng):
             f"Expected 57 items, got {len(quest_items)}"
         print(f"[EnvWorker] Parsed {len(quest_items)} questionnaire items.")
         by_id = {}
-        for idx, it in quest_items.enumerate():
+        for idx, it in enumerate(quest_items):
             by_id[idx] = {"post": it}
 
         return by_id, by_id.keys(), ["1", "2", "3", "4", "5", "6"]
