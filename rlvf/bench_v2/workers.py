@@ -101,6 +101,16 @@ class BenchWorker:
                 tmp = torch.log_softmax(logits.float(), dim=-1)
                 logp = tmp[:, self.verdict_token_ids].cpu()
 
+                # diagnostic: what does the model want instead of a verdict?
+                mass = tmp[:, self.verdict_token_ids].logsumexp(-1).exp().cpu()
+                for row, (pid, m) in enumerate(zip(chunk_ids, mass)):
+                    if m < 0.5:
+                        top_p, top_i = tmp[row].exp().topk(5)
+                        tops = ", ".join(f"{self.tokenizer.convert_ids_to_tokens(int(i))!r}:{p:.2f}"
+                                         for p, i in zip(top_p.tolist(), top_i.tolist()))
+                        print(f"[LOWMASS] {name} profile {profile_id} post {pid} "
+                              f"mass {m:.3f} | top-5: {tops}")
+
                 for id,log in zip(chunk_ids, logp):
                     if "value" in self.benchmark_payloads[id]:
                         result[name][id] = {
