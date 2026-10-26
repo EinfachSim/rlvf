@@ -91,9 +91,9 @@ class BenchWorker:
         chunk_size = 20
         
         for name, agent in self.agents.items():
-            
-            ids = agent.tokenize([posts[0]], prefill=self.fmt["prefill"], chat_template=self.fmt["chat_template"])[0]
-            print(repr(self.tokenizer.decode(ids + list(self.suffix_ids))[-200:]))
+
+            _ids = agent.tokenize([posts[0]], prefill=self.fmt["prefill"], chat_template=self.fmt["chat_template"])[0]
+            print(repr(self.tokenizer.decode(_ids + list(self.suffix_ids))[-200:]))
 
             start = time.time()
             result[name] = {}
