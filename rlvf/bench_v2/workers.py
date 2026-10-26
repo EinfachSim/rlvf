@@ -92,9 +92,6 @@ class BenchWorker:
         
         for name, agent in self.agents.items():
 
-            _ids = agent.tokenize([posts[0]], prefill=self.fmt["prefill"], chat_template=self.fmt["chat_template"])[0]
-            print(repr(self.tokenizer.decode(_ids + list(self.suffix_ids))))
-
             start = time.time()
             result[name] = {}
             #chunked forward
