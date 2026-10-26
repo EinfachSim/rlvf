@@ -97,7 +97,7 @@ class BenchWorker:
                 chunk_start = time.time()
                 chunk_posts = posts[k:k+chunk_size]
                 chunk_ids = ids[k: k+chunk_size]
-                logits = agent.get_logits(chunk_posts, profile, suffix_ids=self.suffix_ids)[:, -1]
+                logits = agent.get_logits(chunk_posts, profile, suffix_ids=self.suffix_ids, prefill="Answer: ")[:, -1]
                 tmp = torch.log_softmax(logits.float(), dim=-1)
                 logp = tmp[:, self.verdict_token_ids].cpu()
 

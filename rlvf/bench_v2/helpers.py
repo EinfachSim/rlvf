@@ -42,14 +42,14 @@ FINE_TO_REFINED = {
 VALUE_TO_INDICES = {**COARSE_TO_REFINED, **FINE_TO_REFINED}
 
 AITA_INSTRUCTION_TERNARY = (
-    "[INST] You will read a post from the subreddit r/AmItheAsshole. The author "
+    "You will read a post from the subreddit r/AmItheAsshole. The author "
     "describes an interpersonal conflict and asks for a judgement.\n\n"
     "Post:\n\"\"\"\n{post}\n\"\"\"\n\n"
     "Judge the author of the post. Answer with EXACTLY one verdict:\n"
     "YTA (you're the asshole), NTA (not the asshole), or Neutral (no clear "
-    "judgement: nobody or everybody is at fault). Do NOT explain. [/INST]\n"
-    "Verdict:"
+    "judgement: nobody or everybody is at fault). Do NOT explain.\n"
 )
+AITA_PREFILL = "Verdict:"
 
 def _extract_state_dict(obj):
     if isinstance(obj, torch.nn.Module):

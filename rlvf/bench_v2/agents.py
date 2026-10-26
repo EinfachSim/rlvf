@@ -73,7 +73,7 @@ class BaseAgent(ABC):
     def uncondition(self):
         pass
 
-    def tokenize(self, queries):
+    def tokenize(self, queries, prefill = ""):
         """
         Takes in a batch of queries and optionally a system prompt and returns their 
         token ids as a list of lists of ints
@@ -87,7 +87,7 @@ class BaseAgent(ABC):
                 add_generation_prompt=True,
                 tokenize=False,
             )
-            ids = self.tokenizer(text, add_special_tokens=False).input_ids
+            ids = self.tokenizer(text + prefill, add_special_tokens=False).input_ids
 
             prompt_ids.append(ids)
         return prompt_ids
@@ -101,13 +101,13 @@ class BaseAgent(ABC):
             attn[i, max_len - len(s):] = 1
         return input_ids, attn
 
-    def get_logits(self, queries, profile, suffix_ids=()):
+    def get_logits(self, queries, profile, suffix_ids=(), prefill = ""):
         """
         receives a batch of queries and returns logits of the answer tokens, conditioned on the profile.
         suffix_ids: tokens appended to every prompt (e.g. Mistral's separate '▁' before digits)
         """
         self.condition(profile)
-        input_ids = self.tokenize(queries)
+        input_ids = self.tokenize(queries, prefill=prefill)
         input_ids, attn_mask = self.pad(input_ids)
         if suffix_ids:
             suf = torch.as_tensor(list(suffix_ids), dtype=input_ids.dtype).expand(input_ids.shape[0], -1)
