@@ -20,8 +20,9 @@ AGENT_REGISTRY = {
 
 @ray.remote(num_gpus=1, num_cpus=8)
 class BenchWorker:
-    def __init__(self, conditions: dict, benchmark_payloads: dict, verdict_tokens: list[str]):
+    def __init__(self, conditions: dict, benchmark_payloads: dict, verdict_tokens: list[str], fmt: dict):
         self.device = "cuda:0"
+        self.fmt = fmt
 
         # loading model
         print("[EnvWorker] Waiting for model load lock...")
@@ -90,6 +91,10 @@ class BenchWorker:
         chunk_size = 20
         
         for name, agent in self.agents.items():
+            
+            ids = agent.tokenize([posts[0]], prefill=self.fmt["prefill"], chat_template=self.fmt["chat_template"])[0]
+            print(repr(self.tokenizer.decode(ids + list(self.suffix_ids))[-200:]))
+
             start = time.time()
             result[name] = {}
             #chunked forward
@@ -97,7 +102,7 @@ class BenchWorker:
                 chunk_start = time.time()
                 chunk_posts = posts[k:k+chunk_size]
                 chunk_ids = ids[k: k+chunk_size]
-                logits = agent.get_logits(chunk_posts, profile, suffix_ids=self.suffix_ids, prefill="Answer: ")[:, -1]
+                logits = agent.get_logits(chunk_posts, profile, suffix_ids=self.suffix_ids, prefill=self.fmt["prefill"], chat_template=self.fmt["chat_template"])[:, -1]
                 tmp = torch.log_softmax(logits.float(), dim=-1)
                 logp = tmp[:, self.verdict_token_ids].cpu()
 

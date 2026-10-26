@@ -144,8 +144,8 @@ def parse_benchmark(bench_name, rng):
         by_id_filtered = {}
         for id in post_ids:
             by_id_filtered[id] = by_id[id]
-        
-        return by_id_filtered, post_ids, ["YTA", "NTA", "Neutral"]
+        fmt = {"chat_template": True, "prefill": AITA_PREFILL}
+        return by_id_filtered, post_ids, ["YTA", "NTA", "Neutral"], fmt
     if bench_name == "pvqrr":
         quest_path = BENCHMARK_REGISTRY[bench_name]["path"]
         import re
@@ -164,4 +164,6 @@ def parse_benchmark(bench_name, rng):
                         f"Reply with a single digit only.\n\n"
                         f"{it.strip()} [/INST]"}
 
-        return by_id, by_id.keys(), ["1", "2", "3", "4", "5", "6"]
+        fmt = {"chat_template": False, "prefill": ""}
+
+        return by_id, by_id.keys(), ["1", "2", "3", "4", "5", "6"], fmt

@@ -73,22 +73,20 @@ class BaseAgent(ABC):
     def uncondition(self):
         pass
 
-    def tokenize(self, queries, prefill = ""):
-        """
-        Takes in a batch of queries and optionally a system prompt and returns their 
-        token ids as a list of lists of ints
-        """
+    def tokenize(self, queries, prefill="", chat_template=True):
         prompt_ids = []
         for query in queries:
-            if self.system_prompt:
-                query = self.system_prompt + "\n\n" + query
-            text = self.tokenizer.apply_chat_template(
-                [{"role": "user", "content": query}],
-                add_generation_prompt=True,
-                tokenize=False,
-            )
-            ids = self.tokenizer(text + prefill, add_special_tokens=False).input_ids
-
+            if chat_template:
+                if self.system_prompt:
+                    query = self.system_prompt + "\n\n" + query
+                text = self.tokenizer.apply_chat_template(
+                    [{"role": "user", "content": query}],
+                    add_generation_prompt=True, tokenize=False) + prefill
+                ids = self.tokenizer(text, add_special_tokens=False).input_ids
+            else:
+                if self.system_prompt:
+                    query = query.replace("[INST] ", "[INST] " + self.system_prompt + "\n\n", 1)
+                ids = self.tokenizer(query + prefill, add_special_tokens=True).input_ids   # adds <s>, like training
             prompt_ids.append(ids)
         return prompt_ids
 
@@ -101,13 +99,13 @@ class BaseAgent(ABC):
             attn[i, max_len - len(s):] = 1
         return input_ids, attn
 
-    def get_logits(self, queries, profile, suffix_ids=(), prefill = ""):
+    def get_logits(self, queries, profile, suffix_ids=(), prefill = "", chat_template=False):
         """
         receives a batch of queries and returns logits of the answer tokens, conditioned on the profile.
         suffix_ids: tokens appended to every prompt (e.g. Mistral's separate '▁' before digits)
         """
         self.condition(profile)
-        input_ids = self.tokenize(queries, prefill=prefill)
+        input_ids = self.tokenize(queries, prefill=prefill, chat_template=chat_template)
         input_ids, attn_mask = self.pad(input_ids)
         if suffix_ids:
             suf = torch.as_tensor(list(suffix_ids), dtype=input_ids.dtype).expand(input_ids.shape[0], -1)

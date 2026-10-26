@@ -56,7 +56,7 @@ class BenchEnv:
 
         print(f"[BenchEnv] preparing {benchmark} benchmark payloads...")
         #prepare benchmark payloads
-        self.benchmark_payloads, self.benchmark_ids, verdict_tokens = parse_benchmark(benchmark, self.rng)
+        self.benchmark_payloads, self.benchmark_ids, verdict_tokens, fmt = parse_benchmark(benchmark, self.rng)
         print(f"[BenchEnv] {benchmark} benchmark payloads ready!")
 
         #Spawn workers
@@ -66,7 +66,7 @@ class BenchEnv:
 
         #distribute payloads to workers:
         payloads_ref = ray.put(self.benchmark_payloads)
-        self.workers = [BenchWorker.remote(conditions, payloads_ref, verdict_tokens) for _ in range(self.num_workers)]
+        self.workers = [BenchWorker.remote(conditions, payloads_ref, verdict_tokens, fmt) for _ in range(self.num_workers)]
         ray.get([w.ready.remote() for w in self.workers])
         print("[BenchEnv] All workers ready.")
 
