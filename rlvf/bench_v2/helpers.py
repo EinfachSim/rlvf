@@ -7,7 +7,7 @@ _STATE_KEYS = ("model_state_dict", "state_dict", "hn_state_dict", "model", "hn")
 BENCHMARK_REGISTRY = {
     "aita": {
         "path": "/home/s03skoeh_hpc/MA/datasets/aita_dataset_10_values_reduced.json",
-        "posts_per_side": None, #to use all posts
+        "posts_per_side": 20, #None to use all posts
         "include_neutral": True,
         "max_post_chars": 4000
     },
