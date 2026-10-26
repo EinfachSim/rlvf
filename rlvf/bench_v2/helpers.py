@@ -10,6 +10,9 @@ BENCHMARK_REGISTRY = {
         "posts_per_side": None, #to use all posts
         "include_neutral": True,
         "max_post_chars": 4000
+    },
+    "pvqrr": {
+        "path":"/lustre/mlnvme/data/s03skoeh_hpc-rlvf/data/questionnaire.txt"
     }
 }
 
@@ -120,12 +123,11 @@ def parse_benchmark(bench_name, rng):
     if bench_name not in BENCHMARK_REGISTRY:
         raise Exception(f"No registry entry found for benchmark {bench_name}!")
 
-    import json
-    with open(BENCHMARK_REGISTRY[bench_name]["path"]) as f:
-        raw = json.load(f)
-
     if bench_name == "aita":
         import aita_helpers
+        import json
+        with open(BENCHMARK_REGISTRY[bench_name]["path"]) as f:
+            raw = json.load(f)
         post_ids = aita_helpers.select_eval_posts(raw, BENCHMARK_REGISTRY[bench_name]["posts_per_side"], rng, 
                                                   include_neutral=BENCHMARK_REGISTRY[bench_name]["include_neutral"])
         items = []
@@ -144,3 +146,19 @@ def parse_benchmark(bench_name, rng):
             by_id_filtered[id] = by_id[id]
         
         return by_id_filtered, post_ids, ["YTA", "NTA", "Neutral"]
+    if bench_name == "pvqrr":
+        quest_path = BENCHMARK_REGISTRY[bench_name]["path"]
+        import re
+        with open(quest_path) as f:
+            raw = f.read()
+        quest_items = re.findall(
+            r'^\s*\d+\.\s+(.+?)(?:\s*\[.*?\])?$', raw, re.MULTILINE
+        )
+        assert len(quest_items) == 57, \
+            f"Expected 57 items, got {len(quest_items)}"
+        print(f"[EnvWorker] Parsed {len(quest_items)} questionnaire items.")
+        by_id = {}
+        for idx, it in quest_items.enumerate():
+            by_id[idx] = {"post": it}
+
+        return by_id, by_id.keys(), ["1", "2", "3", "4", "5", "6"]
