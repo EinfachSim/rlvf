@@ -52,17 +52,30 @@ class BenchWorker:
         self.benchmark_payloads = benchmark_payloads
 
         #get verdict token ids
-        self.verdict_token_ids = self.get_verdict_token_ids(verdict_tokens)
+        self.verdict_token_ids, self.suffix_ids = self.get_verdict_token_ids(verdict_tokens)
 
     def get_verdict_token_ids(self, verdicts):
-        ids = []
+        """Token id per answer at the scored position.
+        Returns (ids, suffix_ids). If the tokenizer splits the leading space into
+        its own token (Mistral digits: ' 1' -> ['▁', '1']), that token must be
+        appended to the prompt and the answer is scored one position later;
+        suffix_ids is then [that token], otherwise [] (AITA verdicts: ' YTA' -> ['▁Y', 'TA'])."""
+        ids, prefix = [], None
         for v in verdicts:
             toks = self.tokenizer(" " + v, add_special_tokens=False).input_ids
-            toks = [t for t in toks if self.tokenizer.convert_ids_to_tokens(t) not in ("▁", " ")] or toks
+            pieces = self.tokenizer.convert_ids_to_tokens(toks)
+            if len(toks) > 1 and pieces[0] in ("▁", " "):
+                assert prefix in (None, toks[0]), f"answers need different prefixes: {verdicts}"
+                prefix = toks[0]
+                toks = toks[1:]
             ids.append(toks[0])
-            print(f"{v!r} -> first token {self.tokenizer.convert_ids_to_tokens(toks[0])!r} (id {toks[0]})")
-        assert len(set(ids)) == len(ids), f"verdicts share a first token: {ids}"
-        return ids
+            print(f"{v!r} -> {pieces} -> scored token "
+                  f"{self.tokenizer.convert_ids_to_tokens(toks[0])!r} (id {toks[0]})")
+        assert len(set(ids)) == len(ids), f"answers share a first token: {ids}"
+        if prefix is not None:
+            print(f"appending prefix token {self.tokenizer.convert_ids_to_tokens(prefix)!r} "
+                  f"(id {prefix}) to every prompt")
+        return ids, ([prefix] if prefix is not None else [])
     
     def ready(self):
         True
@@ -84,7 +97,7 @@ class BenchWorker:
                 chunk_start = time.time()
                 chunk_posts = posts[k:k+chunk_size]
                 chunk_ids = ids[k: k+chunk_size]
-                logits = agent.get_logits(chunk_posts, profile)[:, -1]
+                logits = agent.get_logits(chunk_posts, profile, suffix_ids=self.suffix_ids)[:, -1]
                 tmp = torch.log_softmax(logits.float(), dim=-1)
                 logp = tmp[:, self.verdict_token_ids].cpu()
 

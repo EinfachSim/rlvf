@@ -101,14 +101,20 @@ class BaseAgent(ABC):
             attn[i, max_len - len(s):] = 1
         return input_ids, attn
 
-    def get_logits(self, queries, profile):
+    def get_logits(self, queries, profile, suffix_ids=()):
         """
-        receives a batch of queries and returns logits of the answer tokens, conditioned on the profile
+        receives a batch of queries and returns logits of the answer tokens, conditioned on the profile.
+        suffix_ids: tokens appended to every prompt (e.g. Mistral's separate '▁' before digits)
         """
         self.condition(profile)
         input_ids = self.tokenize(queries)
         input_ids, attn_mask = self.pad(input_ids)
-        logits = self.model(input_ids=input_ids.to(self.device), attention_mask=attn_mask.to(self.device), use_cache=False, logits_to_keep=1).logits
+        if suffix_ids:
+            suf = torch.as_tensor(list(suffix_ids), dtype=input_ids.dtype).expand(input_ids.shape[0], -1)
+            input_ids = torch.cat([input_ids, suf.to(input_ids.device)], dim=1)
+            attn_mask = torch.cat([attn_mask, torch.ones_like(suf, dtype=attn_mask.dtype).to(attn_mask.device)], dim=1)
+        logits = self.model(input_ids=input_ids.to(self.device), attention_mask=attn_mask.to(self.device),
+                            use_cache=False, logits_to_keep=1).logits
         self.uncondition()
         return logits
     
