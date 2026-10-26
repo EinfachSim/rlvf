@@ -159,6 +159,9 @@ def parse_benchmark(bench_name, rng):
         print(f"[EnvWorker] Parsed {len(quest_items)} questionnaire items.")
         by_id = {}
         for idx, it in enumerate(quest_items):
-            by_id[idx] = {"post": it}
+            by_id[idx] = {"post": f"[INST] How much does the following statement describe you?\n"
+                        f"1 = Not like me at all, 6 = Very much like me.\n"
+                        f"Reply with a single digit only.\n\n"
+                        f"{it.strip()} [/INST]"}
 
         return by_id, by_id.keys(), ["1", "2", "3", "4", "5", "6"]
